@@ -17,7 +17,8 @@
       "Bash(bun add:*)",
       "Bash(bunx tsc:*)",
       "Bash(bun build:*)",
-      "Bash(node -e:*)"
+      "Bash(node -e:*)",
+      "Bash(git rm:*)"
     ]
   }
 }

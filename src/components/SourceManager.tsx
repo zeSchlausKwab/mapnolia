@@ -23,6 +23,7 @@ import {
   getLayers,
   addLayer,
   deleteLayer,
+  deleteLayerChunk,
   startLayerChunking,
   getLayerStatus,
   getConfig,
@@ -84,14 +85,19 @@ export function SourceManager() {
           setSources(data || []);
         }
 
-        for (const l of activeChunking) {
-          const job = await getLayerStatus(l.id);
-          setJobs(prev => ({ ...prev, [l.id]: job }));
-          if (job.status === "ready" || job.status === "error") {
-            const [s, la] = await Promise.all([getSources(), getLayers()]);
-            setSources(s || []);
-            setLayers(la || []);
-            break;
+        if (activeChunking.length > 0) {
+          // Refresh layers to get updated persisted chunks
+          const la = await getLayers();
+          setLayers(la || []);
+
+          for (const l of activeChunking) {
+            const job = await getLayerStatus(l.id);
+            setJobs(prev => ({ ...prev, [l.id]: job }));
+            if (job.status === "ready" || job.status === "error") {
+              const s = await getSources();
+              setSources(s || []);
+              break;
+            }
           }
         }
       } catch (e) {
@@ -211,6 +217,16 @@ export function SourceManager() {
         next.delete(id);
         return next;
       });
+    }
+  }
+
+  async function handleDeleteChunk(layerId: string, geohash: string) {
+    if (!confirm(`Delete chunk "${geohash}" and its file?`)) return;
+    try {
+      await deleteLayerChunk(layerId, geohash);
+      await loadData();
+    } catch (e) {
+      setError("Failed to delete chunk");
     }
   }
 
@@ -595,72 +611,18 @@ export function SourceManager() {
 
                   <CollapsibleContent>
                     <div className="border-t p-4 space-y-3">
-                      {/* Chunking progress */}
-                      {(layer.status === "chunking" || (layer.status === "ready" && job)) && job && (
-                        <div className="space-y-3">
-                          {/* Overall progress bar */}
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-xs text-muted-foreground">
-                              <span>{job.status === "ready" ? "Chunking complete" : job.currentTask || "Processing chunks..."}</span>
-                              <span className="font-medium">{job.doneChunks}/{job.totalChunks}</span>
-                            </div>
-                            <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
-                              <div
-                                className={`h-full transition-all duration-300 ${job.status === "ready" ? "bg-green-500" : "bg-primary"}`}
-                                style={{ width: `${job.progress}%` }}
-                              />
-                            </div>
+                      {/* Chunking progress (only during active chunking) */}
+                      {layer.status === "chunking" && job && (
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-xs text-muted-foreground">
+                            <span>{job.currentTask || "Processing chunks..."}</span>
+                            <span className="font-medium">{job.doneChunks}/{job.totalChunks}</span>
                           </div>
-
-                          {/* Per-chunk status grid */}
-                          {job.chunks && job.chunks.length > 0 && (
-                            <div className="space-y-1.5">
-                              <span className="text-xs text-muted-foreground font-medium">Chunks</span>
-                              <div className="max-h-48 overflow-auto rounded border bg-muted/20">
-                                <table className="w-full text-xs">
-                                  <thead>
-                                    <tr className="border-b text-muted-foreground">
-                                      <th className="text-left p-1.5 pl-2">Geohash</th>
-                                      <th className="text-left p-1.5">Status</th>
-                                      <th className="text-left p-1.5">File</th>
-                                      <th className="text-right p-1.5 pr-2">Size</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {job.chunks.map(chunk => (
-                                      <tr key={chunk.geohash} className="border-b last:border-0">
-                                        <td className="p-1.5 pl-2 font-mono font-medium">{chunk.geohash}</td>
-                                        <td className="p-1.5">
-                                          <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] ${
-                                            chunk.status === "done" ? "bg-green-100 text-green-700" :
-                                            chunk.status === "error" ? "bg-red-100 text-red-700" :
-                                            "bg-gray-100 text-gray-600"
-                                          }`}>
-                                            <span className={`inline-block w-1.5 h-1.5 rounded-full ${
-                                              chunk.status === "done" ? "bg-green-500" :
-                                              chunk.status === "error" ? "bg-red-500" :
-                                              "bg-gray-400"
-                                            }`} />
-                                            {chunk.status}
-                                          </span>
-                                        </td>
-                                        <td className="p-1.5 font-mono text-muted-foreground">
-                                          {chunk.file ? `${chunk.file.slice(0, 8)}...${chunk.file.slice(-4)}` : "-"}
-                                        </td>
-                                        <td className="p-1.5 pr-2 text-right text-muted-foreground">
-                                          {chunk.size ? formatBytes(chunk.size) : "-"}
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Pending chunks indicator */}
-                          {job.totalChunks > (job.chunks?.length || 0) && job.status !== "ready" && (
-                            <div className="text-xs text-muted-foreground flex items-center gap-1.5">
+                          <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
+                            <div className="h-full bg-primary transition-all duration-300" style={{ width: `${job.progress}%` }} />
+                          </div>
+                          {job.totalChunks > (job.chunks?.length || 0) && (
+                            <div className="text-xs text-muted-foreground flex items-center gap-1.5 mt-1">
                               <Loader2 className="h-3 w-3 animate-spin" />
                               {job.totalChunks - (job.chunks?.length || 0)} chunk{job.totalChunks - (job.chunks?.length || 0) !== 1 ? "s" : ""} remaining...
                             </div>
@@ -670,11 +632,8 @@ export function SourceManager() {
 
                       {layer.error && <div className="text-sm text-destructive">{layer.error}</div>}
 
+                      {/* Layer info */}
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-                        <div>
-                          <span className="text-muted-foreground">Layer ID</span>
-                          <div className="font-mono mt-0.5">{layer.id}</div>
-                        </div>
                         <div>
                           <span className="text-muted-foreground">Source</span>
                           <div className="font-mono mt-0.5">{layer.sourceId}</div>
@@ -687,7 +646,91 @@ export function SourceManager() {
                           <span className="text-muted-foreground">Precision</span>
                           <div className="mt-0.5">{layer.precision} ({precisionInfo[layer.precision]})</div>
                         </div>
+                        {layer.chunks && (
+                          <div>
+                            <span className="text-muted-foreground">Total Size</span>
+                            <div className="mt-0.5">{formatBytes(Object.values(layer.chunks).reduce((sum, c) => sum + (c.size || 0), 0))}</div>
+                          </div>
+                        )}
                       </div>
+
+                      {/* Persisted chunks table — always shown when chunks exist */}
+                      {(() => {
+                        // During chunking, merge persisted chunks with live job data
+                        const chunkEntries: { geohash: string; file: string; size: number; status: "done" | "error" | "extracting" }[] = [];
+
+                        if (layer.chunks) {
+                          for (const [gh, info] of Object.entries(layer.chunks)) {
+                            chunkEntries.push({
+                              geohash: gh,
+                              file: info.file,
+                              size: info.size || 0,
+                              status: "done",
+                            });
+                          }
+                        }
+
+                        // Add in-progress error chunks from job (not yet persisted)
+                        if (job?.chunks) {
+                          for (const jc of job.chunks) {
+                            if (jc.status === "error" && !chunkEntries.some(c => c.geohash === jc.geohash)) {
+                              chunkEntries.push({ geohash: jc.geohash, file: "", size: 0, status: "error" });
+                            }
+                          }
+                        }
+
+                        chunkEntries.sort((a, b) => a.geohash.localeCompare(b.geohash));
+
+                        if (chunkEntries.length === 0) return null;
+
+                        return (
+                          <div className="space-y-1.5">
+                            <span className="text-xs text-muted-foreground font-medium">
+                              Chunks ({chunkEntries.length})
+                            </span>
+                            <div className="max-h-64 overflow-auto rounded border bg-muted/20">
+                              <table className="w-full text-xs">
+                                <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm">
+                                  <tr className="border-b text-muted-foreground">
+                                    <th className="text-left p-1.5 pl-2">Geohash</th>
+                                    <th className="text-left p-1.5">File</th>
+                                    <th className="text-right p-1.5">Size</th>
+                                    <th className="text-right p-1.5 pr-2 w-8"></th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {chunkEntries.map(chunk => (
+                                    <tr key={chunk.geohash} className="border-b last:border-0 hover:bg-muted/30">
+                                      <td className="p-1.5 pl-2 font-mono font-medium">{chunk.geohash}</td>
+                                      <td className="p-1.5 font-mono text-muted-foreground">
+                                        {chunk.status === "error" ? (
+                                          <span className="text-red-600">error</span>
+                                        ) : chunk.file ? (
+                                          `${chunk.file.replace(".pmtiles", "").slice(0, 10)}...`
+                                        ) : "-"}
+                                      </td>
+                                      <td className="p-1.5 text-right text-muted-foreground">
+                                        {chunk.size ? formatBytes(chunk.size) : "-"}
+                                      </td>
+                                      <td className="p-1.5 pr-2 text-right">
+                                        {chunk.status === "done" && layer.status !== "chunking" && (
+                                          <button
+                                            onClick={() => handleDeleteChunk(layer.id, chunk.geohash)}
+                                            className="text-muted-foreground hover:text-destructive transition-colors"
+                                            title="Delete chunk"
+                                          >
+                                            <Trash2 className="h-3 w-3" />
+                                          </button>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        );
+                      })()}
 
                       {source && (
                         <div className="text-xs text-muted-foreground bg-muted/50 rounded p-2">

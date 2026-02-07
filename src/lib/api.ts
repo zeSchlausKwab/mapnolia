@@ -148,6 +148,7 @@ export interface MapLayer {
   precision: number;
   status: "pending" | "chunking" | "ready" | "error";
   error?: string;
+  chunks?: Chunks;
 }
 
 export interface ChunkResult {
@@ -238,6 +239,13 @@ export async function deleteLayer(id: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error("Failed to delete layer");
+}
+
+export async function deleteLayerChunk(layerId: string, geohash: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/layers/${layerId}/chunks/${geohash}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error("Failed to delete chunk");
 }
 
 export async function startLayerChunking(id: string): Promise<void> {

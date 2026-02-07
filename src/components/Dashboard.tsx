@@ -1,9 +1,7 @@
 import { useEffect, useState } from "react";
 import { Stats } from "./Stats";
-import { ChunkList } from "./ChunkList";
 import { ServerInfo } from "./ServerInfo";
 import { SourceManager } from "./SourceManager";
-import { Downloads } from "./Downloads";
 import { getInfo, type ServerInfo as ServerInfoType } from "@/lib/api";
 
 export function Dashboard() {
@@ -25,7 +23,7 @@ export function Dashboard() {
 
   if (error) {
     return (
-      <div className="container mx-auto p-8">
+      <div className="p-8">
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-6 text-center">
           <h2 className="text-xl font-semibold text-destructive mb-2">
             Connection Error
@@ -40,7 +38,7 @@ export function Dashboard() {
   }
 
   return (
-    <div className="container mx-auto p-8 space-y-8">
+    <div className="p-8 space-y-8 w-full">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -66,14 +64,8 @@ export function Dashboard() {
       {/* Source Management */}
       <SourceManager />
 
-      {/* Main content */}
-      <div className="grid gap-8 lg:grid-cols-2">
-        <ChunkList />
-        <div className="space-y-8">
-          <Downloads />
-          <ServerInfo />
-        </div>
-      </div>
+      {/* Server Config */}
+      <ServerInfo />
     </div>
   );
 }

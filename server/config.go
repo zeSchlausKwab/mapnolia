@@ -66,14 +66,15 @@ type Source struct {
 
 // MapLayer represents an output chunked layer configuration
 type MapLayer struct {
-	ID        string `json:"id"`
-	SourceID  string `json:"sourceId"`  // references a Source
-	Title     string `json:"title"`     // display name
-	MinZoom   int    `json:"minZoom"`   // minimum zoom level to extract
-	MaxZoom   int    `json:"maxZoom"`   // maximum zoom level to extract
-	Precision int    `json:"precision"` // geohash precision (1-4)
-	Status    string `json:"status"`    // pending, chunking, ready, error
-	Error     string `json:"error,omitempty"`
+	ID        string                `json:"id"`
+	SourceID  string                `json:"sourceId"`  // references a Source
+	Title     string                `json:"title"`     // display name
+	MinZoom   int                   `json:"minZoom"`   // minimum zoom level to extract
+	MaxZoom   int                   `json:"maxZoom"`   // maximum zoom level to extract
+	Precision int                   `json:"precision"` // geohash precision (1-4)
+	Status    string                `json:"status"`    // pending, chunking, ready, error
+	Error     string                `json:"error,omitempty"`
+	Chunks    map[string]ChunkInfo  `json:"chunks,omitempty"` // geohash -> chunk info
 }
 
 // Address returns the listen address

@@ -349,12 +349,26 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 			size = info.Size()
 		}
 
-		// Update announcement
-		announcement[gh] = ChunkInfo{
+		// Build chunk info
+		chunkInfo := ChunkInfo{
 			BBox:    bbox,
 			File:    fmt.Sprintf("%s.pmtiles", hash),
 			MaxZoom: layer.MaxZoom,
 			Size:    size,
+		}
+
+		// Update announcement
+		announcement[gh] = chunkInfo
+
+		// Persist chunk in layer config
+		for idx := range config.MapLayers {
+			if config.MapLayers[idx].ID == layer.ID {
+				if config.MapLayers[idx].Chunks == nil {
+					config.MapLayers[idx].Chunks = make(map[string]ChunkInfo)
+				}
+				config.MapLayers[idx].Chunks[gh] = chunkInfo
+				break
+			}
 		}
 
 		job.Chunks = append(job.Chunks, ChunkResult{
@@ -373,7 +387,8 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 			"progress", fmt.Sprintf("%.1f%%", job.Progress),
 		)
 
-		// Save and publish announcement after each chunk
+		// Save config and announcement, then publish
+		config.Save("")
 		if err := saveAnnouncement(announcement); err != nil {
 			slog.Error("failed to save announcement", "error", err)
 		} else {
