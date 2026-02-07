@@ -43,6 +43,12 @@ func main() {
 	}
 	defer store.Close()
 
+	// Initialize chunker
+	if err := initChunker(); err != nil {
+		slog.Error("failed to initialize chunker", "error", err)
+		// Non-fatal, continue without chunking support
+	}
+
 	// Create blossy server
 	blossomServer, err := blossy.NewServer(
 		blossy.WithBaseURL(config.BaseURL),
@@ -148,6 +154,37 @@ func (r *Router) handleAPI(w http.ResponseWriter, req *http.Request) {
 	case strings.HasPrefix(path, "/chunks/") && req.Method == http.MethodDelete:
 		geohash := strings.TrimPrefix(path, "/chunks/")
 		handleRemoveChunk(w, req, geohash)
+
+	// Source management
+	case path == "/sources" && req.Method == http.MethodGet:
+		handleGetSources(w, req)
+	case path == "/sources" && req.Method == http.MethodPost:
+		handleAddSource(w, req)
+	case strings.HasPrefix(path, "/sources/") && req.Method == http.MethodDelete:
+		id := strings.TrimPrefix(path, "/sources/")
+		handleDeleteSource(w, req, id)
+
+	// Layer management
+	case path == "/layers" && req.Method == http.MethodGet:
+		handleGetLayers(w, req)
+	case path == "/layers" && req.Method == http.MethodPost:
+		handleAddLayer(w, req)
+	case strings.HasPrefix(path, "/layers/") && req.Method == http.MethodDelete:
+		id := strings.TrimPrefix(path, "/layers/")
+		handleDeleteLayer(w, req, id)
+	case strings.HasPrefix(path, "/layers/") && strings.HasSuffix(path, "/chunk") && req.Method == http.MethodPost:
+		id := strings.TrimPrefix(path, "/layers/")
+		id = strings.TrimSuffix(id, "/chunk")
+		handleStartLayerChunking(w, req, id)
+	case strings.HasPrefix(path, "/layers/") && strings.HasSuffix(path, "/status") && req.Method == http.MethodGet:
+		id := strings.TrimPrefix(path, "/layers/")
+		id = strings.TrimSuffix(id, "/status")
+		handleGetLayerStatus(w, req, id)
+
+	// Downloads
+	case path == "/downloads" && req.Method == http.MethodGet:
+		handleGetDownloads(w, req)
+
 	default:
 		http.Error(w, "Not found", http.StatusNotFound)
 	}
@@ -283,7 +320,6 @@ func handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"about":      config.About,
 		"picture":    config.Picture,
 		"relays":     config.Relays,
-		"maxZoom":    config.MaxZoom,
 		"diskQuota":  config.DiskQuota,
 		"hasKeypair": config.PrivateKey != "",
 	}
@@ -396,6 +432,265 @@ func handleRemoveChunk(w http.ResponseWriter, r *http.Request, geohash string) {
 		"status":  "removed",
 		"geohash": geohash,
 	})
+}
+
+// ============================================================================
+// Source Management Handlers
+// ============================================================================
+
+func handleGetSources(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(config.Sources)
+}
+
+func handleAddSource(w http.ResponseWriter, r *http.Request) {
+	var source Source
+	if err := json.NewDecoder(r.Body).Decode(&source); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate
+	if source.ID == "" {
+		http.Error(w, "ID is required", http.StatusBadRequest)
+		return
+	}
+	if source.URL == "" {
+		http.Error(w, "URL is required", http.StatusBadRequest)
+		return
+	}
+
+	source.Status = "pending"
+
+	// Check for duplicate ID
+	for _, s := range config.Sources {
+		if s.ID == source.ID {
+			http.Error(w, "Source with this ID already exists", http.StatusConflict)
+			return
+		}
+	}
+
+	config.Sources = append(config.Sources, source)
+	if err := config.Save(""); err != nil {
+		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("📦 source added", "id", source.ID, "url", source.URL)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(source)
+}
+
+func handleDeleteSource(w http.ResponseWriter, r *http.Request, id string) {
+	found := false
+	var newSources []Source
+	for _, s := range config.Sources {
+		if s.ID == id {
+			found = true
+			continue
+		}
+		newSources = append(newSources, s)
+	}
+
+	if !found {
+		http.Error(w, "Source not found", http.StatusNotFound)
+		return
+	}
+
+	config.Sources = newSources
+	if err := config.Save(""); err != nil {
+		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("🗑️ source deleted", "id", id)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
+// ============================================================================
+// Layer Management Handlers
+// ============================================================================
+
+func handleGetLayers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(config.MapLayers)
+}
+
+func handleAddLayer(w http.ResponseWriter, r *http.Request) {
+	var layer MapLayer
+	if err := json.NewDecoder(r.Body).Decode(&layer); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate
+	if layer.ID == "" {
+		http.Error(w, "ID is required", http.StatusBadRequest)
+		return
+	}
+	if layer.SourceID == "" {
+		http.Error(w, "sourceId is required", http.StatusBadRequest)
+		return
+	}
+
+	// Verify source exists
+	sourceExists := false
+	for _, s := range config.Sources {
+		if s.ID == layer.SourceID {
+			sourceExists = true
+			break
+		}
+	}
+	if !sourceExists {
+		http.Error(w, "Source not found", http.StatusBadRequest)
+		return
+	}
+
+	// Set defaults
+	if layer.MaxZoom == 0 {
+		layer.MaxZoom = 14
+	}
+	if layer.Precision == 0 {
+		layer.Precision = 1
+	}
+	layer.Status = "pending"
+
+	// Check for duplicate ID
+	for _, l := range config.MapLayers {
+		if l.ID == layer.ID {
+			http.Error(w, "Layer with this ID already exists", http.StatusConflict)
+			return
+		}
+	}
+
+	config.MapLayers = append(config.MapLayers, layer)
+	if err := config.Save(""); err != nil {
+		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("🗺️ layer added", "id", layer.ID, "sourceId", layer.SourceID)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(layer)
+}
+
+func handleDeleteLayer(w http.ResponseWriter, r *http.Request, id string) {
+	found := false
+	var newLayers []MapLayer
+	for _, l := range config.MapLayers {
+		if l.ID == id {
+			found = true
+			continue
+		}
+		newLayers = append(newLayers, l)
+	}
+
+	if !found {
+		http.Error(w, "Layer not found", http.StatusNotFound)
+		return
+	}
+
+	config.MapLayers = newLayers
+	if err := config.Save(""); err != nil {
+		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("🗑️ layer deleted", "id", id)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
+func handleStartLayerChunking(w http.ResponseWriter, r *http.Request, id string) {
+	if chunker == nil {
+		http.Error(w, "Chunker not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Find the layer
+	var layer *MapLayer
+	for i := range config.MapLayers {
+		if config.MapLayers[i].ID == id {
+			layer = &config.MapLayers[i]
+			break
+		}
+	}
+	if layer == nil {
+		http.Error(w, "Layer not found", http.StatusNotFound)
+		return
+	}
+
+	// Find the source
+	var source *Source
+	for i := range config.Sources {
+		if config.Sources[i].ID == layer.SourceID {
+			source = &config.Sources[i]
+			break
+		}
+	}
+	if source == nil {
+		http.Error(w, "Source not found for layer", http.StatusNotFound)
+		return
+	}
+
+	ctx := context.Background()
+	if err := chunker.StartChunking(ctx, layer, source); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	slog.Info("🚀 chunking started", "layer", id, "source", source.ID)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "started"})
+}
+
+func handleGetLayerStatus(w http.ResponseWriter, r *http.Request, id string) {
+	if chunker == nil {
+		http.Error(w, "Chunker not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	job := chunker.GetJob(id)
+	if job == nil {
+		// Return layer status instead
+		for _, l := range config.MapLayers {
+			if l.ID == id {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"status": l.Status,
+					"error":  l.Error,
+				})
+				return
+			}
+		}
+		http.Error(w, "Layer not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(job)
+}
+
+func handleGetDownloads(w http.ResponseWriter, r *http.Request) {
+	if chunker == nil {
+		http.Error(w, "Chunker not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	downloads, err := chunker.ListDownloads()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(downloads)
 }
 
 // ============================================================================

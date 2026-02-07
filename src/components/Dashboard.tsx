@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Stats } from "./Stats";
 import { ChunkList } from "./ChunkList";
 import { ServerInfo } from "./ServerInfo";
+import { SourceManager } from "./SourceManager";
+import { Downloads } from "./Downloads";
 import { getInfo, type ServerInfo as ServerInfoType } from "@/lib/api";
 
 export function Dashboard() {
@@ -61,10 +63,16 @@ export function Dashboard() {
       {/* Stats */}
       <Stats />
 
+      {/* Source Management */}
+      <SourceManager />
+
       {/* Main content */}
       <div className="grid gap-8 lg:grid-cols-2">
         <ChunkList />
-        <ServerInfo />
+        <div className="space-y-8">
+          <Downloads />
+          <ServerInfo />
+        </div>
       </div>
     </div>
   );

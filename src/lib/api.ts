@@ -108,3 +108,124 @@ export function formatBytes(bytes: number): string {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
+
+// ============================================================================
+// Source Management
+// ============================================================================
+
+// Source represents an input PMTiles file
+export interface Source {
+  id: string;
+  url: string;
+  title?: string;
+  status: "pending" | "downloading" | "ready" | "error";
+  error?: string;
+  size?: number;
+}
+
+// MapLayer represents an output chunked layer configuration
+export interface MapLayer {
+  id: string;
+  sourceId: string;
+  title?: string;
+  minZoom: number;
+  maxZoom: number;
+  precision: number;
+  status: "pending" | "chunking" | "ready" | "error";
+  error?: string;
+}
+
+export interface ChunkJob {
+  sourceId: string;
+  status: string;
+  progress: number;
+  error?: string;
+  totalChunks: number;
+  doneChunks: number;
+}
+
+export interface DownloadedFile {
+  name: string;
+  path: string;
+  size: number;
+  sha256: string;
+  isRemote: boolean;
+  sourceUrl?: string;
+}
+
+// ============================================================================
+// Source Management
+// ============================================================================
+
+export async function getSources(): Promise<Source[]> {
+  const res = await fetch(`${API_BASE}/sources`);
+  if (!res.ok) throw new Error("Failed to fetch sources");
+  return res.json();
+}
+
+export async function addSource(source: { id: string; url: string; title?: string }): Promise<Source> {
+  const res = await fetch(`${API_BASE}/sources`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(source),
+  });
+  if (!res.ok) throw new Error("Failed to add source");
+  return res.json();
+}
+
+export async function deleteSource(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/sources/${id}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error("Failed to delete source");
+}
+
+// ============================================================================
+// Layer Management
+// ============================================================================
+
+export async function getLayers(): Promise<MapLayer[]> {
+  const res = await fetch(`${API_BASE}/layers`);
+  if (!res.ok) throw new Error("Failed to fetch layers");
+  return res.json();
+}
+
+export async function addLayer(layer: Omit<MapLayer, "status" | "error">): Promise<MapLayer> {
+  const res = await fetch(`${API_BASE}/layers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(layer),
+  });
+  if (!res.ok) throw new Error("Failed to add layer");
+  return res.json();
+}
+
+export async function deleteLayer(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/layers/${id}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error("Failed to delete layer");
+}
+
+export async function startLayerChunking(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/layers/${id}/chunk`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to start chunking");
+}
+
+export async function getLayerStatus(id: string): Promise<ChunkJob> {
+  const res = await fetch(`${API_BASE}/layers/${id}/status`);
+  if (!res.ok) throw new Error("Failed to get status");
+  return res.json();
+}
+
+// ============================================================================
+// Downloads
+// ============================================================================
+
+export async function getDownloads(): Promise<DownloadedFile[]> {
+  const res = await fetch(`${API_BASE}/downloads`);
+  if (!res.ok) throw new Error("Failed to fetch downloads");
+  return res.json();
+}

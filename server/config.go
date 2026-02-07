@@ -30,8 +30,33 @@ type Config struct {
 	PrivateKey string   `json:"privateKey"` // hex or nsec
 	Relays     []string `json:"relays"`
 
-	// Map settings
-	MaxZoom int `json:"maxZoom"`
+	// PMTiles sources (input files)
+	Sources []Source `json:"sources,omitempty"`
+
+	// Map layers (output configurations)
+	MapLayers []MapLayer `json:"layers,omitempty"`
+}
+
+// Source represents an input PMTiles file
+type Source struct {
+	ID     string `json:"id"`
+	URL    string `json:"url"`    // local path or remote URL
+	Title  string `json:"title"`  // display name
+	Status string `json:"status"` // pending, downloading, ready, error
+	Error  string `json:"error,omitempty"`
+	Size   int64  `json:"size,omitempty"` // file size once downloaded
+}
+
+// MapLayer represents an output chunked layer configuration
+type MapLayer struct {
+	ID        string `json:"id"`
+	SourceID  string `json:"sourceId"`  // references a Source
+	Title     string `json:"title"`     // display name
+	MinZoom   int    `json:"minZoom"`   // minimum zoom level to extract
+	MaxZoom   int    `json:"maxZoom"`   // maximum zoom level to extract
+	Precision int    `json:"precision"` // geohash precision (1-4)
+	Status    string `json:"status"`    // pending, chunking, ready, error
+	Error     string `json:"error,omitempty"`
 }
 
 // Address returns the listen address
@@ -54,7 +79,6 @@ func DefaultConfig() *Config {
 			"wss://relay.damus.io",
 			"wss://nos.lol",
 		},
-		MaxZoom: 14,
 	}
 }
 
