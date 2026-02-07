@@ -122,12 +122,20 @@ export interface Source {
   error?: string;
   size?: number;
   // Metadata from PMTiles header
-  tileType?: string;        // mvt, png, jpg, webp, avif
-  tileCompression?: string; // gzip, br, zstd, none
+  tileType?: string;
+  tileCompression?: string;
   minZoom?: number;
   maxZoom?: number;
-  bounds?: [number, number, number, number]; // [minLon, minLat, maxLon, maxLat]
-  center?: [number, number, number];         // [lon, lat, zoom]
+  bounds?: [number, number, number, number];
+  center?: [number, number, number];
+  // Extended metadata
+  numTileEntries?: number;
+  numContents?: number;
+  clustered?: boolean;
+  internalCompression?: string;
+  attribution?: string;
+  description?: string;
+  vectorLayers?: string[];
 }
 
 // MapLayer represents an output chunked layer configuration
@@ -233,6 +241,16 @@ export async function startLayerChunking(id: string): Promise<void> {
 export async function getLayerStatus(id: string): Promise<ChunkJob> {
   const res = await fetch(`${API_BASE}/layers/${id}/status`);
   if (!res.ok) throw new Error("Failed to get status");
+  return res.json();
+}
+
+// ============================================================================
+// Announcement
+// ============================================================================
+
+export async function getAnnouncementPreview(): Promise<any> {
+  const res = await fetch(`${API_BASE}/announcement/preview`);
+  if (!res.ok) throw new Error("Failed to get announcement preview");
   return res.json();
 }
 

@@ -509,6 +509,13 @@ func handleAddSource(w http.ResponseWriter, r *http.Request) {
 					config.Sources[i].MaxZoom = header.MaxZoom
 					config.Sources[i].Bounds = header.Bounds
 					config.Sources[i].Center = header.Center
+					config.Sources[i].NumTileEntries = header.NumTileEntries
+					config.Sources[i].NumContents = header.NumContents
+					config.Sources[i].Clustered = header.Clustered
+					config.Sources[i].InternalComp = header.InternalComp
+					config.Sources[i].Attribution = header.Attribution
+					config.Sources[i].Description = header.Description
+					config.Sources[i].VectorLayers = header.VectorLayers
 					config.Sources[i].Status = "ready"
 					slog.Info("📊 metadata fetched", "source", source.ID, "minZoom", header.MinZoom, "maxZoom", header.MaxZoom, "type", header.TileType)
 					break
@@ -561,6 +568,13 @@ func handleRefreshSourceMetadata(w http.ResponseWriter, r *http.Request, id stri
 	config.Sources[sourceIdx].MaxZoom = header.MaxZoom
 	config.Sources[sourceIdx].Bounds = header.Bounds
 	config.Sources[sourceIdx].Center = header.Center
+	config.Sources[sourceIdx].NumTileEntries = header.NumTileEntries
+	config.Sources[sourceIdx].NumContents = header.NumContents
+	config.Sources[sourceIdx].Clustered = header.Clustered
+	config.Sources[sourceIdx].InternalComp = header.InternalComp
+	config.Sources[sourceIdx].Attribution = header.Attribution
+	config.Sources[sourceIdx].Description = header.Description
+	config.Sources[sourceIdx].VectorLayers = header.VectorLayers
 	config.Sources[sourceIdx].Status = "ready"
 	config.Sources[sourceIdx].Error = ""
 	config.Save("")

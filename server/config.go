@@ -53,6 +53,15 @@ type Source struct {
 	MaxZoom         int        `json:"maxZoom,omitempty"`
 	Bounds          [4]float64 `json:"bounds,omitempty"` // [minLon, minLat, maxLon, maxLat]
 	Center          [3]float64 `json:"center,omitempty"` // [lon, lat, zoom]
+
+	// Extended metadata
+	NumTileEntries int      `json:"numTileEntries,omitempty"`
+	NumContents    int      `json:"numContents,omitempty"`
+	Clustered      bool     `json:"clustered,omitempty"`
+	InternalComp   string   `json:"internalCompression,omitempty"`
+	Attribution    string   `json:"attribution,omitempty"`
+	Description    string   `json:"description,omitempty"`
+	VectorLayers   []string `json:"vectorLayers,omitempty"`
 }
 
 // MapLayer represents an output chunked layer configuration

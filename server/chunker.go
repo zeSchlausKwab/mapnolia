@@ -45,6 +45,17 @@ type PMTilesHeader struct {
 	MaxZoom         int        `json:"maxzoom"`
 	Bounds          [4]float64 `json:"bounds"`
 	Center          [3]float64 `json:"center"`
+
+	// Extended (from pmtiles show)
+	NumTileEntries int    `json:"-"`
+	NumContents    int    `json:"-"`
+	Clustered      bool   `json:"-"`
+	InternalComp   string `json:"-"`
+
+	// From metadata JSON
+	Attribution  string   `json:"-"`
+	Description  string   `json:"-"`
+	VectorLayers []string `json:"-"`
 }
 
 // FetchPMTilesMetadata fetches metadata from a PMTiles file using the CLI
@@ -56,6 +67,7 @@ func (c *Chunker) FetchPMTilesMetadata(url string) (*PMTilesHeader, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// Get header JSON
 	cmd := exec.CommandContext(ctx, c.pmtilesBin, "show", "--header-json", url)
 	output, err := cmd.Output()
 	if err != nil {
@@ -65,6 +77,62 @@ func (c *Chunker) FetchPMTilesMetadata(url string) (*PMTilesHeader, error) {
 	var header PMTilesHeader
 	if err := json.Unmarshal(output, &header); err != nil {
 		return nil, fmt.Errorf("failed to parse metadata: %w", err)
+	}
+
+	// Get extended info from plain `pmtiles show`
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel2()
+
+	cmd2 := exec.CommandContext(ctx2, c.pmtilesBin, "show", url)
+	output2, err := cmd2.Output()
+	if err == nil {
+		lines := strings.Split(string(output2), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "tile entries:") || strings.HasPrefix(line, "addressed tiles:") {
+				var val int
+				fmt.Sscanf(strings.TrimSpace(line[strings.Index(line, ":")+1:]), "%d", &val)
+				if strings.HasPrefix(line, "tile entries:") {
+					header.NumTileEntries = val
+				}
+			}
+			if strings.HasPrefix(line, "tile contents:") {
+				fmt.Sscanf(strings.TrimSpace(line[strings.Index(line, ":")+1:]), "%d", &header.NumContents)
+			}
+			if strings.Contains(line, "clustered") {
+				header.Clustered = strings.Contains(line, "true") || strings.Contains(line, "yes")
+			}
+			if strings.HasPrefix(line, "internal compression:") {
+				header.InternalComp = strings.TrimSpace(line[strings.Index(line, ":")+1:])
+			}
+		}
+	}
+
+	// Get metadata JSON
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel3()
+
+	cmd3 := exec.CommandContext(ctx3, c.pmtilesBin, "show", "--metadata", url)
+	output3, err := cmd3.Output()
+	if err == nil {
+		var meta map[string]interface{}
+		if json.Unmarshal(output3, &meta) == nil {
+			if attr, ok := meta["attribution"].(string); ok {
+				header.Attribution = attr
+			}
+			if desc, ok := meta["description"].(string); ok {
+				header.Description = desc
+			}
+			if vl, ok := meta["vector_layers"].([]interface{}); ok {
+				for _, v := range vl {
+					if layer, ok := v.(map[string]interface{}); ok {
+						if id, ok := layer["id"].(string); ok {
+							header.VectorLayers = append(header.VectorLayers, id)
+						}
+					}
+				}
+			}
+		}
 	}
 
 	return &header, nil
