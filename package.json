@@ -1,12 +1,16 @@
 {
-  "name": "bun-react-template",
+  "name": "blosmap",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun --hot src/index.ts",
+    "dev": "bun scripts/dev.ts",
+    "dev:frontend": "bun --hot src/index.ts",
+    "dev:backend": "cd server && go run .",
+    "dev:relay": "nak serve",
     "start": "NODE_ENV=production bun src/index.ts",
-    "build": "bun run build.ts"
+    "build": "bun run build.ts",
+    "build:backend": "cd server && go build -o ../bin/blosmap-server ."
   },
   "dependencies": {
     "@radix-ui/react-label": "^2.1.7",

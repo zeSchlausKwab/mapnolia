@@ -1,41 +1,37 @@
 import { serve } from "bun";
 import index from "./index.html";
 
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:3544";
+
 const server = serve({
   routes: {
-    // Serve index.html for all unmatched routes.
-    "/*": index,
+    // Proxy API requests to Go backend
+    "/api/*": async (req) => {
+      const url = new URL(req.url);
+      const backendUrl = `${BACKEND_URL}${url.pathname}${url.search}`;
 
-    "/api/hello": {
-      async GET(req) {
-        return Response.json({
-          message: "Hello, world!",
-          method: "GET",
-        });
-      },
-      async PUT(req) {
-        return Response.json({
-          message: "Hello, world!",
-          method: "PUT",
-        });
-      },
-    },
+      const response = await fetch(backendUrl, {
+        method: req.method,
+        headers: req.headers,
+        body: req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined,
+      });
 
-    "/api/hello/:name": async req => {
-      const name = req.params.name;
-      return Response.json({
-        message: `Hello, ${name}!`,
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
       });
     },
+
+    // Serve index.html for all other routes
+    "/*": index,
   },
 
   development: process.env.NODE_ENV !== "production" && {
-    // Enable browser hot reloading in development
     hmr: true,
-
-    // Echo console logs from the browser to the server
     console: true,
   },
 });
 
-console.log(`🚀 Server running at ${server.url}`);
+console.log(`🗺️  blosmap frontend running at ${server.url}`);
+console.log(`   Proxying /api/* to ${BACKEND_URL}`);

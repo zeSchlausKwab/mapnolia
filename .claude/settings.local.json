@@ -4,7 +4,11 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:api.github.com)",
-      "WebFetch(domain:nips.nostr.com)"
+      "WebFetch(domain:nips.nostr.com)",
+      "Bash(go get:*)",
+      "Bash(go build:*)",
+      "Bash(bun run build:*)",
+      "Bash(nak:*)"
     ]
   }
 }
