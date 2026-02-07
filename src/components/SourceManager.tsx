@@ -26,6 +26,7 @@ import {
   startLayerChunking,
   getLayerStatus,
   getConfig,
+  formatBytes,
   type Source,
   type MapLayer,
   type ChunkJob,
@@ -52,6 +53,7 @@ export function SourceManager() {
   const [newSource, setNewSource] = useState({ id: "", url: "" });
   const [newLayer, setNewLayer] = useState({ id: "", title: "", sourceId: "", minZoom: 0, maxZoom: 14, precision: 1 });
   const [submitting, setSubmitting] = useState(false);
+  const [startingLayers, setStartingLayers] = useState<Set<string>>(new Set());
 
   // Announcement viewer
   const [announcementEvent, setAnnouncementEvent] = useState<any>(null);
@@ -187,11 +189,28 @@ export function SourceManager() {
   }
 
   async function handleStartChunking(id: string) {
+    setStartingLayers(prev => new Set(prev).add(id));
     try {
       await startLayerChunking(id);
+      // Auto-open the layer so user sees progress
+      setOpenLayers(prev => ({ ...prev, [id]: true }));
+      // Reload data — backend now sets status to "chunking" immediately
       await loadData();
+      // Immediately fetch initial job status
+      try {
+        const job = await getLayerStatus(id);
+        setJobs(prev => ({ ...prev, [id]: job }));
+      } catch {
+        // Job may not be ready yet, polling will pick it up
+      }
     } catch (e) {
       setError("Failed to start chunking");
+    } finally {
+      setStartingLayers(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
   }
 
@@ -537,45 +556,115 @@ export function SourceManager() {
                 onOpenChange={() => setOpenLayers(prev => ({ ...prev, [layer.id]: !prev[layer.id] }))}
               >
                 <div className="rounded-lg border">
-                  <CollapsibleTrigger className="flex w-full items-center gap-3 p-4 hover:bg-muted/50 text-left">
-                    {isOpen ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
-                    <Layers className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">{layer.title || layer.id}</span>
-                        <span className={`text-xs px-2 py-0.5 rounded ${statusColors[layer.status]}`}>
-                          {layer.status === "chunking" && job ? `${job.progress.toFixed(0)}%` : layer.status}
-                        </span>
+                  <CollapsibleTrigger asChild>
+                    <div className="flex w-full items-center gap-3 p-4 hover:bg-muted/50 text-left cursor-pointer" role="button" tabIndex={0}>
+                      {isOpen ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
+                      <Layers className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{layer.title || layer.id}</span>
+                          <span className={`text-xs px-2 py-0.5 rounded ${statusColors[layer.status]}`}>
+                            {layer.status === "chunking" && job ? `${job.progress.toFixed(0)}%` : layer.status}
+                          </span>
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          z{layer.minZoom}-{layer.maxZoom} · precision {layer.precision} ({precisionInfo[layer.precision]?.split(" ")[0]} chunks) · source: {layer.sourceId}
+                        </div>
                       </div>
-                      <div className="text-xs text-muted-foreground mt-0.5">
-                        z{layer.minZoom}-{layer.maxZoom} · precision {layer.precision} ({precisionInfo[layer.precision]?.split(" ")[0]} chunks) · source: {layer.sourceId}
-                      </div>
-                    </div>
-                    <div className="flex gap-1" onClick={e => e.stopPropagation()}>
-                      {layer.status === "pending" && (
-                        <Button size="sm" onClick={() => handleStartChunking(layer.id)}>
-                          <Play className="h-3 w-3 mr-1" />
-                          Start Chunking
+                      <div className="flex gap-1" onClick={e => e.stopPropagation()}>
+                        {(layer.status === "pending" || startingLayers.has(layer.id)) && (
+                          <Button size="sm" onClick={() => handleStartChunking(layer.id)} disabled={startingLayers.has(layer.id)}>
+                            {startingLayers.has(layer.id)
+                              ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                              : <Play className="h-3 w-3 mr-1" />}
+                            {startingLayers.has(layer.id) ? "Starting..." : "Start Chunking"}
+                          </Button>
+                        )}
+                        {layer.status === "chunking" && (
+                          <span className="flex items-center gap-1.5 text-xs text-muted-foreground px-2">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            Chunking...
+                          </span>
+                        )}
+                        <Button variant="ghost" size="sm" onClick={() => handleDeleteLayer(layer.id)} className="text-destructive hover:text-destructive">
+                          <Trash2 className="h-4 w-4" />
                         </Button>
-                      )}
-                      <Button variant="ghost" size="sm" onClick={() => handleDeleteLayer(layer.id)} className="text-destructive hover:text-destructive">
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      </div>
                     </div>
                   </CollapsibleTrigger>
 
                   <CollapsibleContent>
                     <div className="border-t p-4 space-y-3">
-                      {/* Progress bar */}
-                      {layer.status === "chunking" && job && (
-                        <div className="space-y-1">
-                          <div className="flex justify-between text-xs text-muted-foreground">
-                            <span>{job.currentTask || "Processing chunks..."}</span>
-                            <span className="font-medium">{job.doneChunks}/{job.totalChunks}</span>
+                      {/* Chunking progress */}
+                      {(layer.status === "chunking" || (layer.status === "ready" && job)) && job && (
+                        <div className="space-y-3">
+                          {/* Overall progress bar */}
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-xs text-muted-foreground">
+                              <span>{job.status === "ready" ? "Chunking complete" : job.currentTask || "Processing chunks..."}</span>
+                              <span className="font-medium">{job.doneChunks}/{job.totalChunks}</span>
+                            </div>
+                            <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
+                              <div
+                                className={`h-full transition-all duration-300 ${job.status === "ready" ? "bg-green-500" : "bg-primary"}`}
+                                style={{ width: `${job.progress}%` }}
+                              />
+                            </div>
                           </div>
-                          <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
-                            <div className="h-full bg-primary transition-all duration-300" style={{ width: `${job.progress}%` }} />
-                          </div>
+
+                          {/* Per-chunk status grid */}
+                          {job.chunks && job.chunks.length > 0 && (
+                            <div className="space-y-1.5">
+                              <span className="text-xs text-muted-foreground font-medium">Chunks</span>
+                              <div className="max-h-48 overflow-auto rounded border bg-muted/20">
+                                <table className="w-full text-xs">
+                                  <thead>
+                                    <tr className="border-b text-muted-foreground">
+                                      <th className="text-left p-1.5 pl-2">Geohash</th>
+                                      <th className="text-left p-1.5">Status</th>
+                                      <th className="text-left p-1.5">File</th>
+                                      <th className="text-right p-1.5 pr-2">Size</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {job.chunks.map(chunk => (
+                                      <tr key={chunk.geohash} className="border-b last:border-0">
+                                        <td className="p-1.5 pl-2 font-mono font-medium">{chunk.geohash}</td>
+                                        <td className="p-1.5">
+                                          <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] ${
+                                            chunk.status === "done" ? "bg-green-100 text-green-700" :
+                                            chunk.status === "error" ? "bg-red-100 text-red-700" :
+                                            "bg-gray-100 text-gray-600"
+                                          }`}>
+                                            <span className={`inline-block w-1.5 h-1.5 rounded-full ${
+                                              chunk.status === "done" ? "bg-green-500" :
+                                              chunk.status === "error" ? "bg-red-500" :
+                                              "bg-gray-400"
+                                            }`} />
+                                            {chunk.status}
+                                          </span>
+                                        </td>
+                                        <td className="p-1.5 font-mono text-muted-foreground">
+                                          {chunk.file ? `${chunk.file.slice(0, 8)}...${chunk.file.slice(-4)}` : "-"}
+                                        </td>
+                                        <td className="p-1.5 pr-2 text-right text-muted-foreground">
+                                          {chunk.size ? formatBytes(chunk.size) : "-"}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Pending chunks indicator */}
+                          {job.totalChunks > (job.chunks?.length || 0) && job.status !== "ready" && (
+                            <div className="text-xs text-muted-foreground flex items-center gap-1.5">
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                              {job.totalChunks - (job.chunks?.length || 0)} chunk{job.totalChunks - (job.chunks?.length || 0) !== 1 ? "s" : ""} remaining...
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -699,39 +788,41 @@ export function SourceManager() {
                 onOpenChange={() => setOpenSources(prev => ({ ...prev, [source.id]: !prev[source.id] }))}
               >
                 <div className="rounded-lg border">
-                  <CollapsibleTrigger className="flex w-full items-center gap-3 p-4 hover:bg-muted/50 text-left">
-                    {isOpen ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
-                    <Database className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">{source.title || source.id}</span>
-                        <span className={`text-xs px-2 py-0.5 rounded ${statusColors[source.status]}`}>
-                          {source.status === "fetching_metadata" ? (
-                            <span className="flex items-center gap-1">
-                              <Loader2 className="h-3 w-3 animate-spin" />
-                              Loading
-                            </span>
-                          ) : source.status}
-                        </span>
-                        {sourceLayers.length > 0 && (
-                          <span className="text-xs text-muted-foreground">
-                            {sourceLayers.length} layer{sourceLayers.length !== 1 ? "s" : ""}
+                  <CollapsibleTrigger asChild>
+                    <div className="flex w-full items-center gap-3 p-4 hover:bg-muted/50 text-left cursor-pointer" role="button" tabIndex={0}>
+                      {isOpen ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
+                      <Database className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{source.title || source.id}</span>
+                          <span className={`text-xs px-2 py-0.5 rounded ${statusColors[source.status]}`}>
+                            {source.status === "fetching_metadata" ? (
+                              <span className="flex items-center gap-1">
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                                Loading
+                              </span>
+                            ) : source.status}
                           </span>
+                          {sourceLayers.length > 0 && (
+                            <span className="text-xs text-muted-foreground">
+                              {sourceLayers.length} layer{sourceLayers.length !== 1 ? "s" : ""}
+                            </span>
+                          )}
+                        </div>
+                        {source.status === "ready" && source.tileType && (
+                          <div className="text-xs text-muted-foreground mt-0.5">
+                            {source.tileType.toUpperCase()} · z{source.minZoom}-{source.maxZoom} · {source.tileCompression}
+                          </div>
                         )}
                       </div>
-                      {source.status === "ready" && source.tileType && (
-                        <div className="text-xs text-muted-foreground mt-0.5">
-                          {source.tileType.toUpperCase()} · z{source.minZoom}-{source.maxZoom} · {source.tileCompression}
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex gap-1" onClick={e => e.stopPropagation()}>
-                      <Button variant="ghost" size="sm" onClick={() => handleRefreshMetadata(source.id)} title="Refresh metadata">
-                        <RefreshCw className="h-4 w-4" />
-                      </Button>
-                      <Button variant="ghost" size="sm" onClick={() => handleDeleteSource(source.id)} className="text-destructive hover:text-destructive">
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      <div className="flex gap-1" onClick={e => e.stopPropagation()}>
+                        <Button variant="ghost" size="sm" onClick={() => handleRefreshMetadata(source.id)} title="Refresh metadata">
+                          <RefreshCw className="h-4 w-4" />
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => handleDeleteSource(source.id)} className="text-destructive hover:text-destructive">
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </div>
                   </CollapsibleTrigger>
 

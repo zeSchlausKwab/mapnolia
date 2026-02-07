@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,15 +25,25 @@ type Chunker struct {
 	jobs       map[string]*ChunkJob
 }
 
+// ChunkResult tracks a single completed chunk
+type ChunkResult struct {
+	Geohash string `json:"geohash"`
+	File    string `json:"file"`
+	Size    int64  `json:"size"`
+	Status  string `json:"status"` // done, error, skipped
+	Error   string `json:"error,omitempty"`
+}
+
 // ChunkJob tracks a chunking operation
 type ChunkJob struct {
 	SourceID    string  `json:"sourceId"`
-	Status      string  `json:"status"` // pending, downloading, chunking, ready, error
+	Status      string  `json:"status"` // pending, chunking, ready, error
 	Progress    float64 `json:"progress"`
 	Error       string  `json:"error,omitempty"`
 	TotalChunks int     `json:"totalChunks"`
 	DoneChunks  int     `json:"doneChunks"`
-	CurrentTask string  `json:"currentTask,omitempty"` // Description of current operation
+	CurrentTask string  `json:"currentTask,omitempty"`
+	Chunks      []ChunkResult `json:"chunks,omitempty"`
 }
 
 // PMTilesHeader represents metadata from a PMTiles file
@@ -227,10 +236,19 @@ func (c *Chunker) StartChunking(ctx context.Context, layer *MapLayer, source *So
 
 	job := &ChunkJob{
 		SourceID: layer.ID,
-		Status:   "pending",
+		Status:   "chunking",
 	}
 	c.jobs[layer.ID] = job
 	c.mu.Unlock()
+
+	// Update layer status in config immediately so frontend sees "chunking"
+	for i := range config.MapLayers {
+		if config.MapLayers[i].ID == layer.ID {
+			config.MapLayers[i].Status = "chunking"
+			break
+		}
+	}
+	config.Save("")
 
 	go c.runChunking(ctx, layer, source, job)
 	return nil
@@ -249,13 +267,18 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 		config.Save("")
 	}()
 
-	// Resolve input file from source
-	inputPath, err := c.resolveInput(ctx, source, job)
-	if err != nil {
-		job.Status = "error"
-		job.Error = err.Error()
-		slog.Error("failed to resolve input", "layer", layer.ID, "source", source.ID, "error", err)
-		return
+	// Resolve input — for remote URLs, use directly (pmtiles extract supports HTTP Range requests)
+	inputPath := source.URL
+	if !strings.HasPrefix(inputPath, "http://") && !strings.HasPrefix(inputPath, "https://") {
+		if !filepath.IsAbs(inputPath) {
+			inputPath = filepath.Join("..", inputPath)
+		}
+		if _, err := os.Stat(inputPath); err != nil {
+			job.Status = "error"
+			job.Error = fmt.Sprintf("local file not found: %s", source.URL)
+			slog.Error("failed to resolve input", "layer", layer.ID, "source", source.ID, "error", err)
+			return
+		}
 	}
 
 	// Generate geohashes for the given precision
@@ -286,8 +309,15 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 		bbox := geohashToBBox(gh)
 		outputPath := filepath.Join(c.outputDir, fmt.Sprintf("%s.pmtiles", gh))
 
+		job.CurrentTask = fmt.Sprintf("Extracting geohash %s (z%d-%d)", gh, layer.MinZoom, layer.MaxZoom)
+
 		if err := c.extractRegion(ctx, inputPath, outputPath, bbox, layer.MinZoom, layer.MaxZoom); err != nil {
 			slog.Error("failed to extract region", "geohash", gh, "error", err)
+			job.Chunks = append(job.Chunks, ChunkResult{
+				Geohash: gh, Status: "error", Error: err.Error(),
+			})
+			job.DoneChunks = i + 1
+			job.Progress = float64(i+1) / float64(len(geohashes)) * 100
 			continue
 		}
 
@@ -295,6 +325,11 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 		hash, err := hashFile(outputPath)
 		if err != nil {
 			slog.Error("failed to hash file", "path", outputPath, "error", err)
+			job.Chunks = append(job.Chunks, ChunkResult{
+				Geohash: gh, Status: "error", Error: err.Error(),
+			})
+			job.DoneChunks = i + 1
+			job.Progress = float64(i+1) / float64(len(geohashes)) * 100
 			continue
 		}
 
@@ -322,6 +357,12 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 			Size:    size,
 		}
 
+		job.Chunks = append(job.Chunks, ChunkResult{
+			Geohash: gh,
+			File:    hash[:12],
+			Size:    size,
+			Status:  "done",
+		})
 		job.DoneChunks = i + 1
 		job.Progress = float64(i+1) / float64(len(geohashes)) * 100
 
@@ -349,70 +390,6 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 	}()
 }
 
-func (c *Chunker) resolveInput(ctx context.Context, source *Source, job *ChunkJob) (string, error) {
-	url := source.URL
-
-	// Check if it's a local file
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		// Local file - resolve relative to project root
-		path := url
-		if !filepath.IsAbs(path) {
-			path = filepath.Join("..", path)
-		}
-		if _, err := os.Stat(path); err != nil {
-			return "", fmt.Errorf("local file not found: %s", url)
-		}
-		return path, nil
-	}
-
-	// Remote URL - download first
-	job.Status = "downloading"
-	slog.Info("downloading remote PMTiles", "url", url)
-
-	downloadPath := filepath.Join(config.DataDir, "downloads")
-	os.MkdirAll(downloadPath, 0755)
-
-	// Use URL hash as filename
-	urlHash := sha256.Sum256([]byte(url))
-	localPath := filepath.Join(downloadPath, fmt.Sprintf("%s.pmtiles", hex.EncodeToString(urlHash[:8])))
-
-	// Check if already downloaded
-	if _, err := os.Stat(localPath); err == nil {
-		slog.Info("using cached download", "path", localPath)
-		return localPath, nil
-	}
-
-	// Download the file
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed: %s", resp.Status)
-	}
-
-	f, err := os.Create(localPath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	_, err = io.Copy(f, resp.Body)
-	if err != nil {
-		os.Remove(localPath)
-		return "", err
-	}
-
-	slog.Info("download complete", "path", localPath)
-	return localPath, nil
-}
 
 func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox [4]float64, minZoom, maxZoom int) error {
 	if c.pmtilesBin == "" {

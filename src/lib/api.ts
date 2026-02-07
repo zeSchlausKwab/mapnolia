@@ -150,6 +150,14 @@ export interface MapLayer {
   error?: string;
 }
 
+export interface ChunkResult {
+  geohash: string;
+  file?: string;
+  size?: number;
+  status: "done" | "error" | "skipped";
+  error?: string;
+}
+
 export interface ChunkJob {
   sourceId: string;
   status: string;
@@ -158,6 +166,7 @@ export interface ChunkJob {
   totalChunks: number;
   doneChunks: number;
   currentTask?: string;
+  chunks?: ChunkResult[];
 }
 
 export interface DownloadedFile {
