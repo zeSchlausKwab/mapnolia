@@ -448,7 +448,7 @@ func handleRemoveChunk(w http.ResponseWriter, r *http.Request, geohash string) {
 	}
 
 	// Delete the file from disk
-	filePath := filepath.Join(config.DataDir, chunk.File)
+	filePath := filepath.Join(config.DataDir, "chunks", chunk.File)
 	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
 		slog.Error("failed to delete chunk file", "path", filePath, "error", err)
 	}
@@ -739,7 +739,7 @@ func handleDeleteLayer(w http.ResponseWriter, r *http.Request, id string) {
 	// Delete chunk files from disk and remove from announcement
 	announcement, _ := loadAnnouncement()
 	for gh, chunk := range deletedLayer.Chunks {
-		filePath := filepath.Join(config.DataDir, chunk.File)
+		filePath := filepath.Join(config.DataDir, "chunks", chunk.File)
 		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
 			slog.Error("failed to delete chunk file", "path", filePath, "error", err)
 		}
@@ -791,7 +791,7 @@ func handleDeleteLayerChunk(w http.ResponseWriter, r *http.Request, layerID, geo
 	}
 
 	// Delete file from disk
-	filePath := filepath.Join(config.DataDir, chunk.File)
+	filePath := filepath.Join(config.DataDir, "chunks", chunk.File)
 	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
 		slog.Error("failed to delete chunk file", "path", filePath, "error", err)
 	}
