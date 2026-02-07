@@ -372,22 +372,21 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 			"size", size,
 			"progress", fmt.Sprintf("%.1f%%", job.Progress),
 		)
-	}
 
-	// Save announcement
-	if err := saveAnnouncement(announcement); err != nil {
-		slog.Error("failed to save announcement", "error", err)
+		// Save and publish announcement after each chunk
+		if err := saveAnnouncement(announcement); err != nil {
+			slog.Error("failed to save announcement", "error", err)
+		} else {
+			go func() {
+				pubCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				PublishAnnouncement(pubCtx)
+			}()
+		}
 	}
 
 	job.Status = "ready"
 	slog.Info("chunking complete", "layer", layer.ID, "chunks", job.DoneChunks)
-
-	// Publish updated announcement
-	go func() {
-		pubCtx, cancel := context.WithTimeout(context.Background(), 30)
-		defer cancel()
-		PublishAnnouncement(pubCtx)
-	}()
 }
 
 

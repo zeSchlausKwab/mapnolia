@@ -430,7 +430,41 @@ func handleAddChunk(w http.ResponseWriter, r *http.Request, geohash string) {
 func handleRemoveChunk(w http.ResponseWriter, r *http.Request, geohash string) {
 	slog.Info("🗑️ chunk removal requested", "geohash", geohash)
 
-	// TODO: Remove chunk and update announcement
+	announcement, err := loadAnnouncement()
+	if err != nil {
+		http.Error(w, "Failed to load announcement", http.StatusInternalServerError)
+		return
+	}
+
+	chunk, exists := announcement[geohash]
+	if !exists {
+		http.Error(w, "Chunk not found in announcement", http.StatusNotFound)
+		return
+	}
+
+	// Delete the file from disk
+	filePath := filepath.Join(config.DataDir, chunk.File)
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		slog.Error("failed to delete chunk file", "path", filePath, "error", err)
+	}
+
+	// Remove from announcement
+	delete(announcement, geohash)
+	if err := saveAnnouncement(announcement); err != nil {
+		http.Error(w, "Failed to save announcement", http.StatusInternalServerError)
+		return
+	}
+
+	// Republish
+	go func() {
+		pubCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := PublishAnnouncement(pubCtx); err != nil {
+			slog.Error("failed to publish after chunk removal", "error", err)
+		}
+	}()
+
+	slog.Info("🗑️ chunk removed", "geohash", geohash, "file", chunk.File)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -702,6 +736,37 @@ func handleDeleteLayer(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, "Failed to save config", http.StatusInternalServerError)
 		return
 	}
+
+	// Remove this layer's chunks from the announcement and republish
+	go func() {
+		announcement, err := loadAnnouncement()
+		if err != nil {
+			slog.Error("failed to load announcement for cleanup", "error", err)
+			return
+		}
+
+		// Get the chunker's job to find which geohashes belong to this layer
+		if chunker != nil {
+			if job := chunker.GetJob(id); job != nil && job.Chunks != nil {
+				for _, chunk := range job.Chunks {
+					if chunk.Status == "done" {
+						delete(announcement, chunk.Geohash)
+					}
+				}
+			}
+		}
+
+		if err := saveAnnouncement(announcement); err != nil {
+			slog.Error("failed to save announcement after layer delete", "error", err)
+			return
+		}
+
+		pubCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := PublishAnnouncement(pubCtx); err != nil {
+			slog.Error("failed to publish after layer delete", "error", err)
+		}
+	}()
 
 	slog.Info("🗑️ layer deleted", "id", id)
 
