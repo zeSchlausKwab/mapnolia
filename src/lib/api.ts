@@ -35,6 +35,8 @@ export interface Config {
   relays: string[];
   maxZoom: number;
   diskQuota: number;
+  hasKeypair: boolean;
+  npub?: string;
 }
 
 export async function getInfo(): Promise<ServerInfo> {
@@ -82,6 +84,21 @@ export async function removeChunk(geohash: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error("Failed to remove chunk");
+}
+
+export async function generateKeypair(): Promise<{ npub: string }> {
+  const res = await fetch(`${API_BASE}/keypair`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to generate keypair");
+  return res.json();
+}
+
+export async function publishAnnouncement(): Promise<void> {
+  const res = await fetch(`${API_BASE}/publish`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to publish announcement");
 }
 
 export function formatBytes(bytes: number): string {

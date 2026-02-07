@@ -3,9 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
+
+var configPath string // track which config file was loaded
 
 // Config holds server configuration
 type Config struct {
@@ -62,6 +65,7 @@ func LoadConfig() (*Config, error) {
 	// Try to load from config file
 	configPaths := []string{
 		"blosmap.config.json",
+		"../blosmap.config.json", // when running from server/ directory
 		"config.json",
 		filepath.Join(os.Getenv("HOME"), ".config", "blosmap", "config.json"),
 	}
@@ -71,6 +75,8 @@ func LoadConfig() (*Config, error) {
 	for _, path := range configPaths {
 		configData, err = os.ReadFile(path)
 		if err == nil {
+			configPath = path
+			slog.Info("loaded config", "path", path)
 			break
 		}
 	}
@@ -79,6 +85,8 @@ func LoadConfig() (*Config, error) {
 		if err := json.Unmarshal(configData, config); err != nil {
 			return nil, fmt.Errorf("failed to parse config: %w", err)
 		}
+	} else {
+		slog.Info("no config file found, using defaults")
 	}
 
 	// Environment overrides
@@ -106,8 +114,14 @@ func LoadConfig() (*Config, error) {
 	return config, nil
 }
 
-// Save writes the config to file
+// Save writes the config to file. If path is empty, uses the loaded config path.
 func (c *Config) Save(path string) error {
+	if path == "" {
+		path = configPath
+	}
+	if path == "" {
+		path = "blosmap.config.json"
+	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err

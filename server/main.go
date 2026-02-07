@@ -138,6 +138,10 @@ func (r *Router) handleAPI(w http.ResponseWriter, req *http.Request) {
 		handleGetConfig(w, req)
 	case path == "/config" && req.Method == http.MethodPatch:
 		handleUpdateConfig(w, req)
+	case path == "/keypair" && req.Method == http.MethodPost:
+		handleGenerateKeypair(w, req)
+	case path == "/publish" && req.Method == http.MethodPost:
+		handlePublishAnnouncement(w, req)
 	case strings.HasPrefix(path, "/chunks/") && req.Method == http.MethodPost:
 		geohash := strings.TrimPrefix(path, "/chunks/")
 		handleAddChunk(w, req, geohash)
@@ -275,12 +279,20 @@ func handleGetStats(w http.ResponseWriter, r *http.Request) {
 func handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// Return public config (no private key)
 	publicConfig := map[string]interface{}{
-		"name":      config.Name,
-		"about":     config.About,
-		"picture":   config.Picture,
-		"relays":    config.Relays,
-		"maxZoom":   config.MaxZoom,
-		"diskQuota": config.DiskQuota,
+		"name":       config.Name,
+		"about":      config.About,
+		"picture":    config.Picture,
+		"relays":     config.Relays,
+		"maxZoom":    config.MaxZoom,
+		"diskQuota":  config.DiskQuota,
+		"hasKeypair": config.PrivateKey != "",
+	}
+
+	// Include npub if keypair exists
+	if config.PrivateKey != "" {
+		if npub, err := GetNpub(config.PrivateKey); err == nil {
+			publicConfig["npub"] = npub
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -305,10 +317,61 @@ func handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		config.Picture = picture
 	}
 
-	// TODO: Save config and republish announcement
+	// Save config to file
+	if err := config.Save(""); err != nil {
+		slog.Error("failed to save config", "error", err)
+	}
+
+	// Publish announcement to relays
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := PublishAnnouncement(ctx); err != nil {
+			slog.Error("failed to publish announcement", "error", err)
+		}
+	}()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
+}
+
+func handleGenerateKeypair(w http.ResponseWriter, r *http.Request) {
+	if config.PrivateKey != "" {
+		http.Error(w, "Keypair already exists", http.StatusConflict)
+		return
+	}
+
+	nsec, npub, err := GenerateKeyPair()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	config.PrivateKey = nsec
+	if err := config.Save(""); err != nil {
+		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("🔑 keypair generated", "npub", npub)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"npub": npub,
+	})
+}
+
+func handlePublishAnnouncement(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	if err := PublishAnnouncement(ctx); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "published"})
 }
 
 func handleAddChunk(w http.ResponseWriter, r *http.Request, geohash string) {

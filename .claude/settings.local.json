@@ -8,7 +8,8 @@
       "Bash(go get:*)",
       "Bash(go build:*)",
       "Bash(bun run build:*)",
-      "Bash(nak:*)"
+      "Bash(nak:*)",
+      "Bash(go mod tidy:*)"
     ]
   }
 }
