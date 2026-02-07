@@ -118,9 +118,16 @@ export interface Source {
   id: string;
   url: string;
   title?: string;
-  status: "pending" | "downloading" | "ready" | "error";
+  status: "pending" | "fetching_metadata" | "downloading" | "ready" | "error";
   error?: string;
   size?: number;
+  // Metadata from PMTiles header
+  tileType?: string;        // mvt, png, jpg, webp, avif
+  tileCompression?: string; // gzip, br, zstd, none
+  minZoom?: number;
+  maxZoom?: number;
+  bounds?: [number, number, number, number]; // [minLon, minLat, maxLon, maxLat]
+  center?: [number, number, number];         // [lon, lat, zoom]
 }
 
 // MapLayer represents an output chunked layer configuration
@@ -142,6 +149,7 @@ export interface ChunkJob {
   error?: string;
   totalChunks: number;
   doneChunks: number;
+  currentTask?: string;
 }
 
 export interface DownloadedFile {
@@ -178,6 +186,14 @@ export async function deleteSource(id: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error("Failed to delete source");
+}
+
+export async function refreshSourceMetadata(id: string): Promise<Source> {
+  const res = await fetch(`${API_BASE}/sources/${id}/refresh`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to refresh metadata");
+  return res.json();
 }
 
 // ============================================================================

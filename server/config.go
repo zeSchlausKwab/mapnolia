@@ -45,6 +45,14 @@ type Source struct {
 	Status string `json:"status"` // pending, downloading, ready, error
 	Error  string `json:"error,omitempty"`
 	Size   int64  `json:"size,omitempty"` // file size once downloaded
+
+	// Metadata from PMTiles header
+	TileType        string     `json:"tileType,omitempty"`        // mvt, png, jpg, webp, avif
+	TileCompression string     `json:"tileCompression,omitempty"` // gzip, br, zstd, none
+	MinZoom         int        `json:"minZoom,omitempty"`
+	MaxZoom         int        `json:"maxZoom,omitempty"`
+	Bounds          [4]float64 `json:"bounds,omitempty"` // [minLon, minLat, maxLon, maxLat]
+	Center          [3]float64 `json:"center,omitempty"` // [lon, lat, zoom]
 }
 
 // MapLayer represents an output chunked layer configuration

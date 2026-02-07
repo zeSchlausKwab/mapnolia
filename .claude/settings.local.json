@@ -11,7 +11,13 @@
       "Bash(nak:*)",
       "Bash(go mod tidy:*)",
       "Bash(bunx shadcn@latest add:*)",
-      "Bash(timeout 10 bun run:*)"
+      "Bash(timeout 10 bun run:*)",
+      "Bash(../bin/pmtiles-mac-silicon show:*)",
+      "Bash(/Users/schlaus/workspace/blosmap/bin/pmtiles-mac-silicon show:*)",
+      "Bash(bun add:*)",
+      "Bash(bunx tsc:*)",
+      "Bash(bun build:*)",
+      "Bash(node -e:*)"
     ]
   }
 }

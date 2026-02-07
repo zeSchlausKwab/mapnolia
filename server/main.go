@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -160,6 +161,10 @@ func (r *Router) handleAPI(w http.ResponseWriter, req *http.Request) {
 		handleGetSources(w, req)
 	case path == "/sources" && req.Method == http.MethodPost:
 		handleAddSource(w, req)
+	case strings.HasPrefix(path, "/sources/") && strings.HasSuffix(path, "/refresh") && req.Method == http.MethodPost:
+		id := strings.TrimPrefix(path, "/sources/")
+		id = strings.TrimSuffix(id, "/refresh")
+		handleRefreshSourceMetadata(w, req, id)
 	case strings.HasPrefix(path, "/sources/") && req.Method == http.MethodDelete:
 		id := strings.TrimPrefix(path, "/sources/")
 		handleDeleteSource(w, req, id)
@@ -460,7 +465,7 @@ func handleAddSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	source.Status = "pending"
+	source.Status = "fetching_metadata"
 
 	// Check for duplicate ID
 	for _, s := range config.Sources {
@@ -478,8 +483,92 @@ func handleAddSource(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("📦 source added", "id", source.ID, "url", source.URL)
 
+	// Fetch metadata in background
+	go func() {
+		if chunker == nil {
+			return
+		}
+		header, err := chunker.FetchPMTilesMetadata(source.URL)
+		if err != nil {
+			slog.Error("failed to fetch metadata", "source", source.ID, "error", err)
+			// Update source with error
+			for i := range config.Sources {
+				if config.Sources[i].ID == source.ID {
+					config.Sources[i].Status = "error"
+					config.Sources[i].Error = fmt.Sprintf("Failed to fetch metadata: %v", err)
+					break
+				}
+			}
+		} else {
+			// Update source with metadata
+			for i := range config.Sources {
+				if config.Sources[i].ID == source.ID {
+					config.Sources[i].TileType = header.TileType
+					config.Sources[i].TileCompression = header.TileCompression
+					config.Sources[i].MinZoom = header.MinZoom
+					config.Sources[i].MaxZoom = header.MaxZoom
+					config.Sources[i].Bounds = header.Bounds
+					config.Sources[i].Center = header.Center
+					config.Sources[i].Status = "ready"
+					slog.Info("📊 metadata fetched", "source", source.ID, "minZoom", header.MinZoom, "maxZoom", header.MaxZoom, "type", header.TileType)
+					break
+				}
+			}
+		}
+		config.Save("")
+	}()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(source)
+}
+
+func handleRefreshSourceMetadata(w http.ResponseWriter, r *http.Request, id string) {
+	if chunker == nil {
+		http.Error(w, "Chunker not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	var source *Source
+	var sourceIdx int
+	for i := range config.Sources {
+		if config.Sources[i].ID == id {
+			source = &config.Sources[i]
+			sourceIdx = i
+			break
+		}
+	}
+
+	if source == nil {
+		http.Error(w, "Source not found", http.StatusNotFound)
+		return
+	}
+
+	config.Sources[sourceIdx].Status = "fetching_metadata"
+	config.Save("")
+
+	header, err := chunker.FetchPMTilesMetadata(source.URL)
+	if err != nil {
+		config.Sources[sourceIdx].Status = "error"
+		config.Sources[sourceIdx].Error = fmt.Sprintf("Failed to fetch metadata: %v", err)
+		config.Save("")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	config.Sources[sourceIdx].TileType = header.TileType
+	config.Sources[sourceIdx].TileCompression = header.TileCompression
+	config.Sources[sourceIdx].MinZoom = header.MinZoom
+	config.Sources[sourceIdx].MaxZoom = header.MaxZoom
+	config.Sources[sourceIdx].Bounds = header.Bounds
+	config.Sources[sourceIdx].Center = header.Center
+	config.Sources[sourceIdx].Status = "ready"
+	config.Sources[sourceIdx].Error = ""
+	config.Save("")
+
+	slog.Info("📊 metadata refreshed", "source", id, "minZoom", header.MinZoom, "maxZoom", header.MaxZoom)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(config.Sources[sourceIdx])
 }
 
 func handleDeleteSource(w http.ResponseWriter, r *http.Request, id string) {

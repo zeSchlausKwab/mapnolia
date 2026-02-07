@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Chunker handles PMTiles extraction and chunking
@@ -26,12 +28,46 @@ type Chunker struct {
 
 // ChunkJob tracks a chunking operation
 type ChunkJob struct {
-	SourceID   string  `json:"sourceId"`
-	Status     string  `json:"status"` // pending, downloading, chunking, ready, error
-	Progress   float64 `json:"progress"`
-	Error      string  `json:"error,omitempty"`
-	TotalChunks int    `json:"totalChunks"`
-	DoneChunks  int    `json:"doneChunks"`
+	SourceID    string  `json:"sourceId"`
+	Status      string  `json:"status"` // pending, downloading, chunking, ready, error
+	Progress    float64 `json:"progress"`
+	Error       string  `json:"error,omitempty"`
+	TotalChunks int     `json:"totalChunks"`
+	DoneChunks  int     `json:"doneChunks"`
+	CurrentTask string  `json:"currentTask,omitempty"` // Description of current operation
+}
+
+// PMTilesHeader represents metadata from a PMTiles file
+type PMTilesHeader struct {
+	TileCompression string     `json:"tile_compression"`
+	TileType        string     `json:"tile_type"`
+	MinZoom         int        `json:"minzoom"`
+	MaxZoom         int        `json:"maxzoom"`
+	Bounds          [4]float64 `json:"bounds"`
+	Center          [3]float64 `json:"center"`
+}
+
+// FetchPMTilesMetadata fetches metadata from a PMTiles file using the CLI
+func (c *Chunker) FetchPMTilesMetadata(url string) (*PMTilesHeader, error) {
+	if c.pmtilesBin == "" {
+		return nil, fmt.Errorf("pmtiles binary not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, c.pmtilesBin, "show", "--header-json", url)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
+	}
+
+	var header PMTilesHeader
+	if err := json.Unmarshal(output, &header); err != nil {
+		return nil, fmt.Errorf("failed to parse metadata: %w", err)
+	}
+
+	return &header, nil
 }
 
 // DownloadedFile represents a downloaded PMTiles file
