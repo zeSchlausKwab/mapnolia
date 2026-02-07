@@ -120,7 +120,8 @@ func (c *Config) Save(path string) error {
 		path = configPath
 	}
 	if path == "" {
-		path = "blosmap.config.json"
+		// Default to parent directory (project root)
+		path = "../blosmap.config.json"
 	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
