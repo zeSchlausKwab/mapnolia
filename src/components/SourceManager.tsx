@@ -52,7 +52,7 @@ export function SourceManager() {
 
   // Form state
   const [newSource, setNewSource] = useState({ id: "", url: "" });
-  const [newLayer, setNewLayer] = useState({ id: "", title: "", sourceId: "", minZoom: 0, maxZoom: 14, precision: 1 });
+  const [newLayer, setNewLayer] = useState({ id: "", title: "", sourceId: "", minZoom: 0, maxZoom: 14, precision: 1, maxChunkSize: 0, maxPrecision: 4 });
   const [submitting, setSubmitting] = useState(false);
   const [startingLayers, setStartingLayers] = useState<Set<string>>(new Set());
 
@@ -173,8 +173,10 @@ export function SourceManager() {
         minZoom: newLayer.minZoom,
         maxZoom: newLayer.maxZoom,
         precision: newLayer.precision,
+        maxChunkSize: newLayer.maxChunkSize,
+        maxPrecision: newLayer.maxPrecision,
       });
-      setNewLayer({ id: "", title: "", sourceId: "", minZoom: 0, maxZoom: 14, precision: 1 });
+      setNewLayer({ id: "", title: "", sourceId: "", minZoom: 0, maxZoom: 14, precision: 1, maxChunkSize: 0, maxPrecision: 4 });
       setShowAddLayer(false);
       await loadData();
     } catch (e) {
@@ -245,6 +247,8 @@ export function SourceManager() {
       minZoom: defaultSource?.minZoom || 0,
       maxZoom: defaultSource?.maxZoom || 14,
       precision: 1,
+      maxChunkSize: 500 * 1024 * 1024, // 500MB default
+      maxPrecision: 4,
     });
   }
 
@@ -518,7 +522,7 @@ export function SourceManager() {
 
                     {/* Precision */}
                     <div className="space-y-1">
-                      <Label className="text-xs">Geohash Precision</Label>
+                      <Label className="text-xs">Starting Geohash Precision</Label>
                       <select
                         value={newLayer.precision}
                         onChange={e => setNewLayer({ ...newLayer, precision: parseInt(e.target.value) })}
@@ -528,6 +532,80 @@ export function SourceManager() {
                           <option key={p} value={p}>{p} - {precisionInfo[p]}</option>
                         ))}
                       </select>
+                    </div>
+
+                    {/* Adaptive Subdivision */}
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="adaptive-subdivision"
+                          checked={newLayer.maxChunkSize > 0}
+                          onChange={e => setNewLayer(prev => ({
+                            ...prev,
+                            maxChunkSize: e.target.checked ? 500 * 1024 * 1024 : 0,
+                          }))}
+                          className="h-4 w-4 accent-primary"
+                        />
+                        <Label htmlFor="adaptive-subdivision" className="text-xs">
+                          Adaptive subdivision (split large chunks automatically)
+                        </Label>
+                      </div>
+
+                      {newLayer.maxChunkSize > 0 && (
+                        <div className="space-y-3 pl-6 border-l-2 border-primary/20">
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <Label className="text-xs">Max chunk size</Label>
+                              <div className="flex items-center gap-1">
+                                <Input
+                                  type="number"
+                                  value={Math.round(newLayer.maxChunkSize / (1024 * 1024))}
+                                  onChange={e => setNewLayer(prev => ({
+                                    ...prev,
+                                    maxChunkSize: Math.max(10, parseInt(e.target.value || "0")) * 1024 * 1024,
+                                  }))}
+                                  className="h-7 w-20 text-xs text-right"
+                                  min={10}
+                                  max={4096}
+                                />
+                                <span className="text-xs text-muted-foreground">MB</span>
+                              </div>
+                            </div>
+                            <input
+                              type="range"
+                              min={10}
+                              max={4096}
+                              value={Math.round(newLayer.maxChunkSize / (1024 * 1024))}
+                              onChange={e => setNewLayer(prev => ({
+                                ...prev,
+                                maxChunkSize: parseInt(e.target.value) * 1024 * 1024,
+                              }))}
+                              className="w-full h-2 accent-primary"
+                            />
+                            <div className="flex justify-between text-[10px] text-muted-foreground">
+                              <span>10 MB</span>
+                              <span>4 GB</span>
+                            </div>
+                          </div>
+
+                          <div className="space-y-1">
+                            <Label className="text-xs">Max subdivision depth</Label>
+                            <select
+                              value={newLayer.maxPrecision}
+                              onChange={e => setNewLayer(prev => ({
+                                ...prev,
+                                maxPrecision: parseInt(e.target.value),
+                              }))}
+                              className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+                            >
+                              <option value={2}>2 (up to 1,024 chunks)</option>
+                              <option value={3}>3 (up to 32,768 chunks)</option>
+                              <option value={4}>4 (up to ~1M chunks)</option>
+                            </select>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 );
@@ -584,7 +662,7 @@ export function SourceManager() {
                           </span>
                         </div>
                         <div className="text-xs text-muted-foreground mt-0.5">
-                          z{layer.minZoom}-{layer.maxZoom} · precision {layer.precision} ({precisionInfo[layer.precision]?.split(" ")[0]} chunks) · source: {layer.sourceId}
+                          z{layer.minZoom}-{layer.maxZoom} · precision {layer.precision}{layer.maxChunkSize ? ` (adaptive, max ${formatBytes(layer.maxChunkSize)})` : ` (${precisionInfo[layer.precision]?.split(" ")[0]} chunks)`} · source: {layer.sourceId}
                         </div>
                       </div>
                       <div className="flex gap-1" onClick={e => e.stopPropagation()}>
@@ -621,12 +699,19 @@ export function SourceManager() {
                           <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
                             <div className="h-full bg-primary transition-all duration-300" style={{ width: `${job.progress}%` }} />
                           </div>
-                          {job.totalChunks > (job.chunks?.length || 0) && (
-                            <div className="text-xs text-muted-foreground flex items-center gap-1.5 mt-1">
-                              <Loader2 className="h-3 w-3 animate-spin" />
-                              {job.totalChunks - (job.chunks?.length || 0)} chunk{job.totalChunks - (job.chunks?.length || 0) !== 1 ? "s" : ""} remaining...
-                            </div>
-                          )}
+                          <div className="flex items-center gap-3 mt-1">
+                            {job.totalChunks > (job.chunks?.length || 0) && (
+                              <div className="text-xs text-muted-foreground flex items-center gap-1.5">
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                                {job.totalChunks - (job.chunks?.length || 0)} chunk{job.totalChunks - (job.chunks?.length || 0) !== 1 ? "s" : ""} remaining...
+                              </div>
+                            )}
+                            {job.subdivisions != null && job.subdivisions > 0 && (
+                              <span className="text-xs text-amber-600">
+                                {job.subdivisions} subdivision{job.subdivisions !== 1 ? "s" : ""}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       )}
 
@@ -643,8 +728,12 @@ export function SourceManager() {
                           <div className="mt-0.5">z{layer.minZoom} - z{layer.maxZoom}</div>
                         </div>
                         <div>
-                          <span className="text-muted-foreground">Precision</span>
-                          <div className="mt-0.5">{layer.precision} ({precisionInfo[layer.precision]})</div>
+                          <span className="text-muted-foreground">Subdivision</span>
+                          <div className="mt-0.5">
+                            {layer.maxChunkSize
+                              ? `Adaptive (max ${formatBytes(layer.maxChunkSize)}, depth ${layer.maxPrecision || 4})`
+                              : `Fixed precision ${layer.precision}`}
+                          </div>
                         </div>
                         {layer.chunks && (
                           <div>

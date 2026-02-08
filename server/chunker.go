@@ -36,14 +36,15 @@ type ChunkResult struct {
 
 // ChunkJob tracks a chunking operation
 type ChunkJob struct {
-	SourceID    string  `json:"sourceId"`
-	Status      string  `json:"status"` // pending, chunking, ready, error
-	Progress    float64 `json:"progress"`
-	Error       string  `json:"error,omitempty"`
-	TotalChunks int     `json:"totalChunks"`
-	DoneChunks  int     `json:"doneChunks"`
-	CurrentTask string  `json:"currentTask,omitempty"`
-	Chunks      []ChunkResult `json:"chunks,omitempty"`
+	SourceID     string        `json:"sourceId"`
+	Status       string        `json:"status"` // pending, chunking, ready, error
+	Progress     float64       `json:"progress"`
+	Error        string        `json:"error,omitempty"`
+	TotalChunks  int           `json:"totalChunks"`
+	DoneChunks   int           `json:"doneChunks"`
+	CurrentTask  string        `json:"currentTask,omitempty"`
+	Chunks       []ChunkResult `json:"chunks,omitempty"`
+	Subdivisions int           `json:"subdivisions"` // count of subdivision operations performed
 }
 
 // PMTilesHeader represents metadata from a PMTiles file
@@ -281,7 +282,13 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 		}
 	}
 
-	// Generate geohashes for the given precision
+	// Determine max precision for subdivision
+	maxPrecision := layer.MaxPrecision
+	if maxPrecision <= 0 || maxPrecision > 4 {
+		maxPrecision = 4
+	}
+
+	// Generate geohashes for the starting precision
 	geohashes := generateGeohashes(layer.Precision)
 	job.TotalChunks = len(geohashes)
 	job.Status = "chunking"
@@ -291,13 +298,15 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 		"source", source.ID,
 		"precision", layer.Precision,
 		"chunks", len(geohashes),
+		"maxChunkSize", layer.MaxChunkSize,
+		"maxPrecision", maxPrecision,
 		"minZoom", layer.MinZoom,
 		"maxZoom", layer.MaxZoom,
 	)
 
 	announcement, _ := loadAnnouncement()
 
-	for i, gh := range geohashes {
+	for _, gh := range geohashes {
 		select {
 		case <-ctx.Done():
 			job.Status = "error"
@@ -316,77 +325,48 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 			job.Chunks = append(job.Chunks, ChunkResult{
 				Geohash: gh, Status: "error", Error: err.Error(),
 			})
-			job.DoneChunks = i + 1
-			job.Progress = float64(i+1) / float64(len(geohashes)) * 100
+			job.DoneChunks++
+			job.Progress = float64(job.DoneChunks) / float64(job.TotalChunks) * 100
 			continue
 		}
 
-		// Register with blisk store so Blossom can serve the file
-		f, err := os.Open(outputPath)
+		// Check file size for adaptive subdivision
+		fileInfo, err := os.Stat(outputPath)
 		if err != nil {
-			slog.Error("failed to open extracted file", "path", outputPath, "error", err)
+			slog.Error("failed to stat extracted file", "path", outputPath, "error", err)
 			job.Chunks = append(job.Chunks, ChunkResult{
 				Geohash: gh, Status: "error", Error: err.Error(),
 			})
-			job.DoneChunks = i + 1
-			job.Progress = float64(i+1) / float64(len(geohashes)) * 100
-			continue
-		}
-		meta, err := store.Save(ctx, f, "blosmap")
-		f.Close()
-		os.Remove(outputPath) // Clean up temp extract file
-		if err != nil {
-			slog.Error("failed to save to store", "geohash", gh, "error", err)
-			job.Chunks = append(job.Chunks, ChunkResult{
-				Geohash: gh, Status: "error", Error: err.Error(),
-			})
-			job.DoneChunks = i + 1
-			job.Progress = float64(i+1) / float64(len(geohashes)) * 100
+			job.DoneChunks++
+			job.Progress = float64(job.DoneChunks) / float64(job.TotalChunks) * 100
 			continue
 		}
 
-		hash := meta.Hash.Hex()
-		size := meta.Size
+		needsSubdivision := layer.MaxChunkSize > 0 &&
+			fileInfo.Size() > layer.MaxChunkSize &&
+			len(gh) < maxPrecision
 
-		// Build chunk info
-		chunkInfo := ChunkInfo{
-			BBox:    bbox,
-			File:    fmt.Sprintf("%s.pmtiles", hash),
-			MaxZoom: layer.MaxZoom,
-			Size:    size,
+		if needsSubdivision {
+			slog.Info("chunk exceeds size threshold, subdividing",
+				"geohash", gh,
+				"size", formatSize(fileInfo.Size()),
+				"threshold", formatSize(layer.MaxChunkSize),
+			)
+			job.CurrentTask = fmt.Sprintf("Subdividing %s (%s > %s)", gh, formatSize(fileInfo.Size()), formatSize(layer.MaxChunkSize))
+			job.Subdivisions++
+			// Replace parent with 32 children in the count
+			job.TotalChunks += 31
+
+			c.processSubdivision(ctx, gh, outputPath, layer, job, announcement, maxPrecision)
+
+			// Clean up parent temp file (not registered with blisk)
+			os.Remove(outputPath)
+		} else {
+			// Leaf chunk: register with blisk store
+			c.registerLeafChunk(ctx, gh, outputPath, bbox, layer, job, announcement)
 		}
 
-		// Update announcement
-		announcement[gh] = chunkInfo
-
-		// Persist chunk in layer config
-		for idx := range config.MapLayers {
-			if config.MapLayers[idx].ID == layer.ID {
-				if config.MapLayers[idx].Chunks == nil {
-					config.MapLayers[idx].Chunks = make(map[string]ChunkInfo)
-				}
-				config.MapLayers[idx].Chunks[gh] = chunkInfo
-				break
-			}
-		}
-
-		job.Chunks = append(job.Chunks, ChunkResult{
-			Geohash: gh,
-			File:    hash[:12],
-			Size:    size,
-			Status:  "done",
-		})
-		job.DoneChunks = i + 1
-		job.Progress = float64(i+1) / float64(len(geohashes)) * 100
-
-		slog.Info("extracted chunk",
-			"geohash", gh,
-			"file", hash[:8],
-			"size", size,
-			"progress", fmt.Sprintf("%.1f%%", job.Progress),
-		)
-
-		// Save config and announcement, then publish
+		// Save config and announcement after each top-level geohash completes
 		config.Save("")
 		if err := saveAnnouncement(announcement); err != nil {
 			slog.Error("failed to save announcement", "error", err)
@@ -400,7 +380,157 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 	}
 
 	job.Status = "ready"
-	slog.Info("chunking complete", "layer", layer.ID, "chunks", job.DoneChunks)
+	slog.Info("chunking complete", "layer", layer.ID, "chunks", job.DoneChunks, "subdivisions", job.Subdivisions)
+}
+
+// processSubdivision recursively splits an oversized chunk into 32 children.
+// The parentPath must remain on disk until this function returns.
+func (c *Chunker) processSubdivision(
+	ctx context.Context,
+	parentGH string,
+	parentPath string,
+	layer *MapLayer,
+	job *ChunkJob,
+	announcement map[string]ChunkInfo,
+	maxPrecision int,
+) {
+	slog.Info("subdividing chunk", "parent", parentGH, "children", 32)
+
+	for _, char := range base32 {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		childGH := parentGH + string(char)
+		childBBox := geohashToBBox(childGH)
+		childPath := filepath.Join(c.outputDir, fmt.Sprintf("%s.pmtiles", childGH))
+
+		job.CurrentTask = fmt.Sprintf("Extracting %s from parent %s", childGH, parentGH)
+
+		// Extract from parent file (local), not from remote source
+		if err := c.extractRegion(ctx, parentPath, childPath, childBBox, layer.MinZoom, layer.MaxZoom); err != nil {
+			slog.Error("failed to extract child region", "geohash", childGH, "error", err)
+			job.Chunks = append(job.Chunks, ChunkResult{
+				Geohash: childGH, Status: "error", Error: err.Error(),
+			})
+			job.DoneChunks++
+			job.Progress = float64(job.DoneChunks) / float64(job.TotalChunks) * 100
+			continue
+		}
+
+		// Check child size for recursive subdivision
+		childInfo, err := os.Stat(childPath)
+		if err != nil {
+			slog.Error("failed to stat child file", "path", childPath, "error", err)
+			job.Chunks = append(job.Chunks, ChunkResult{
+				Geohash: childGH, Status: "error", Error: err.Error(),
+			})
+			job.DoneChunks++
+			job.Progress = float64(job.DoneChunks) / float64(job.TotalChunks) * 100
+			continue
+		}
+
+		needsSubdivision := layer.MaxChunkSize > 0 &&
+			childInfo.Size() > layer.MaxChunkSize &&
+			len(childGH) < maxPrecision
+
+		if needsSubdivision {
+			slog.Info("child chunk exceeds threshold, subdividing further",
+				"geohash", childGH,
+				"size", formatSize(childInfo.Size()),
+				"threshold", formatSize(layer.MaxChunkSize),
+			)
+			job.Subdivisions++
+			job.TotalChunks += 31
+
+			c.processSubdivision(ctx, childGH, childPath, layer, job, announcement, maxPrecision)
+
+			// Clean up child temp file after its children are extracted
+			os.Remove(childPath)
+		} else {
+			// Leaf chunk: register with blisk store
+			c.registerLeafChunk(ctx, childGH, childPath, childBBox, layer, job, announcement)
+		}
+	}
+
+	slog.Info("subdivision complete", "parent", parentGH)
+}
+
+// registerLeafChunk registers a chunk file with blisk store and updates announcement/config.
+// The temp file at path is cleaned up after registration.
+func (c *Chunker) registerLeafChunk(
+	ctx context.Context,
+	gh string,
+	path string,
+	bbox [4]float64,
+	layer *MapLayer,
+	job *ChunkJob,
+	announcement map[string]ChunkInfo,
+) {
+	f, err := os.Open(path)
+	if err != nil {
+		slog.Error("failed to open extracted file", "path", path, "error", err)
+		job.Chunks = append(job.Chunks, ChunkResult{
+			Geohash: gh, Status: "error", Error: err.Error(),
+		})
+		job.DoneChunks++
+		job.Progress = float64(job.DoneChunks) / float64(job.TotalChunks) * 100
+		return
+	}
+	meta, err := store.Save(ctx, f, "blosmap")
+	f.Close()
+	os.Remove(path) // Clean up temp extract file
+	if err != nil {
+		slog.Error("failed to save to store", "geohash", gh, "error", err)
+		job.Chunks = append(job.Chunks, ChunkResult{
+			Geohash: gh, Status: "error", Error: err.Error(),
+		})
+		job.DoneChunks++
+		job.Progress = float64(job.DoneChunks) / float64(job.TotalChunks) * 100
+		return
+	}
+
+	hash := meta.Hash.Hex()
+	size := meta.Size
+
+	chunkInfo := ChunkInfo{
+		BBox:    bbox,
+		File:    fmt.Sprintf("%s.pmtiles", hash),
+		MaxZoom: layer.MaxZoom,
+		Size:    size,
+	}
+
+	// Update announcement
+	announcement[gh] = chunkInfo
+
+	// Persist chunk in layer config
+	for idx := range config.MapLayers {
+		if config.MapLayers[idx].ID == layer.ID {
+			if config.MapLayers[idx].Chunks == nil {
+				config.MapLayers[idx].Chunks = make(map[string]ChunkInfo)
+			}
+			config.MapLayers[idx].Chunks[gh] = chunkInfo
+			break
+		}
+	}
+
+	job.Chunks = append(job.Chunks, ChunkResult{
+		Geohash: gh,
+		File:    hash[:12],
+		Size:    size,
+		Status:  "done",
+	})
+	job.DoneChunks++
+	job.Progress = float64(job.DoneChunks) / float64(job.TotalChunks) * 100
+
+	slog.Info("registered chunk",
+		"geohash", gh,
+		"file", hash[:8],
+		"size", formatSize(size),
+		"progress", fmt.Sprintf("%.1f%%", job.Progress),
+	)
 }
 
 
@@ -497,6 +627,20 @@ func (c *Chunker) ListDownloads() ([]DownloadedFile, error) {
 	}
 
 	return files, nil
+}
+
+// formatSize returns a human-readable size string
+func formatSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 // Geohash utilities

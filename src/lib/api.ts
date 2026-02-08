@@ -147,6 +147,8 @@ export interface MapLayer {
   minZoom: number;
   maxZoom: number;
   precision: number;
+  maxChunkSize?: number;  // bytes; chunks exceeding this get subdivided (0 = disabled)
+  maxPrecision?: number;  // max depth for recursive subdivision (default 4)
   status: "pending" | "chunking" | "ready" | "error";
   error?: string;
   chunks?: Chunks;
@@ -169,6 +171,7 @@ export interface ChunkJob {
   doneChunks: number;
   currentTask?: string;
   chunks?: ChunkResult[];
+  subdivisions?: number;  // count of subdivision operations performed
 }
 
 export interface DownloadedFile {

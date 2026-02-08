@@ -20,7 +20,8 @@
       "Bash(node -e:*)",
       "Bash(git rm:*)",
       "Bash(go env:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(go vet:*)"
     ]
   }
 }
