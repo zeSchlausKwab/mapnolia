@@ -698,7 +698,7 @@ func handleAddLayer(w http.ResponseWriter, r *http.Request) {
 	}
 	layer.Status = "pending"
 	if layer.MaxPrecision <= 0 {
-		layer.MaxPrecision = 4
+		layer.MaxPrecision = 2
 	}
 
 	// Check for duplicate ID

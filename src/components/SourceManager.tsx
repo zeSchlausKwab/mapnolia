@@ -52,7 +52,7 @@ export function SourceManager() {
 
   // Form state
   const [newSource, setNewSource] = useState({ id: "", url: "" });
-  const [newLayer, setNewLayer] = useState({ id: "", title: "", sourceId: "", minZoom: 0, maxZoom: 14, precision: 1, maxChunkSize: 0, maxPrecision: 4 });
+  const [newLayer, setNewLayer] = useState({ id: "", title: "", sourceId: "", minZoom: 0, maxZoom: 14, precision: 1, maxChunkSize: 0, maxPrecision: 2 });
   const [submitting, setSubmitting] = useState(false);
   const [startingLayers, setStartingLayers] = useState<Set<string>>(new Set());
 
@@ -176,7 +176,7 @@ export function SourceManager() {
         maxChunkSize: newLayer.maxChunkSize,
         maxPrecision: newLayer.maxPrecision,
       });
-      setNewLayer({ id: "", title: "", sourceId: "", minZoom: 0, maxZoom: 14, precision: 1, maxChunkSize: 0, maxPrecision: 4 });
+      setNewLayer({ id: "", title: "", sourceId: "", minZoom: 0, maxZoom: 14, precision: 1, maxChunkSize: 0, maxPrecision: 2 });
       setShowAddLayer(false);
       await loadData();
     } catch (e) {
@@ -248,7 +248,7 @@ export function SourceManager() {
       maxZoom: defaultSource?.maxZoom || 14,
       precision: 1,
       maxChunkSize: 500 * 1024 * 1024, // 500MB default
-      maxPrecision: 4,
+      maxPrecision: 2,
     });
   }
 
@@ -345,6 +345,7 @@ export function SourceManager() {
   };
 
   const precisionInfo: Record<number, string> = {
+    0: "1 chunk (entire world)",
     1: "32 chunks (~45\u00b0)",
     2: "1,024 chunks (~11\u00b0)",
     3: "32,768 chunks (~1.4\u00b0)",
@@ -528,7 +529,7 @@ export function SourceManager() {
                         onChange={e => setNewLayer({ ...newLayer, precision: parseInt(e.target.value) })}
                         className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                       >
-                        {[1, 2, 3, 4].map(p => (
+                        {[0, 1, 2, 3, 4].map(p => (
                           <option key={p} value={p}>{p} - {precisionInfo[p]}</option>
                         ))}
                       </select>
@@ -731,7 +732,7 @@ export function SourceManager() {
                           <span className="text-muted-foreground">Subdivision</span>
                           <div className="mt-0.5">
                             {layer.maxChunkSize
-                              ? `Adaptive (max ${formatBytes(layer.maxChunkSize)}, depth ${layer.maxPrecision || 4})`
+                              ? `Adaptive (max ${formatBytes(layer.maxChunkSize)}, depth ${layer.maxPrecision || 2})`
                               : `Fixed precision ${layer.precision}`}
                           </div>
                         </div>
@@ -746,11 +747,12 @@ export function SourceManager() {
                       {/* Persisted chunks table — always shown when chunks exist */}
                       {(() => {
                         // During chunking, merge persisted chunks with live job data
-                        const chunkEntries: { geohash: string; file: string; size: number; status: "done" | "error" | "extracting" }[] = [];
+                        type ChunkEntry = { geohash: string; file: string; size: number; status: "done" | "error" | "extracting"; isParent?: boolean };
+                        const leafEntries: ChunkEntry[] = [];
 
                         if (layer.chunks) {
                           for (const [gh, info] of Object.entries(layer.chunks)) {
-                            chunkEntries.push({
+                            leafEntries.push({
                               geohash: gh,
                               file: info.file,
                               size: info.size || 0,
@@ -762,20 +764,47 @@ export function SourceManager() {
                         // Add in-progress error chunks from job (not yet persisted)
                         if (job?.chunks) {
                           for (const jc of job.chunks) {
-                            if (jc.status === "error" && !chunkEntries.some(c => c.geohash === jc.geohash)) {
-                              chunkEntries.push({ geohash: jc.geohash, file: "", size: 0, status: "error" });
+                            if (jc.status === "error" && !leafEntries.some(c => c.geohash === jc.geohash)) {
+                              leafEntries.push({ geohash: jc.geohash, file: "", size: 0, status: "error" });
                             }
                           }
                         }
 
-                        chunkEntries.sort((a, b) => a.geohash.localeCompare(b.geohash));
+                        if (leafEntries.length === 0) return null;
 
-                        if (chunkEntries.length === 0) return null;
+                        // Base precision for indentation (precision 0 uses "" as geohash, length 0)
+                        const basePrecision = layer.precision || 0;
+
+                        // Synthesize parent rows for subdivided chunks
+                        const leafSet = new Set(leafEntries.map(c => c.geohash));
+                        const parentSet = new Set<string>();
+                        for (const entry of leafEntries) {
+                          const gh = entry.geohash || "";
+                          // Walk up from leaf to base precision, adding missing parents
+                          for (let len = gh.length - 1; len >= basePrecision; len--) {
+                            const parent = gh.slice(0, len);
+                            if (leafSet.has(parent) || parentSet.has(parent)) break;
+                            parentSet.add(parent);
+                          }
+                        }
+
+                        const allEntries: ChunkEntry[] = [
+                          ...leafEntries,
+                          ...[...parentSet].map(gh => ({
+                            geohash: gh,
+                            file: "",
+                            size: 0,
+                            status: "done" as const,
+                            isParent: true,
+                          })),
+                        ];
+
+                        allEntries.sort((a, b) => a.geohash.localeCompare(b.geohash));
 
                         return (
                           <div className="space-y-1.5">
                             <span className="text-xs text-muted-foreground font-medium">
-                              Chunks ({chunkEntries.length})
+                              Chunks ({leafEntries.length})
                             </span>
                             <div className="max-h-64 overflow-auto rounded border bg-muted/20">
                               <table className="w-full text-xs">
@@ -788,39 +817,51 @@ export function SourceManager() {
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {chunkEntries.map(chunk => (
-                                    <tr key={chunk.geohash} className="border-b last:border-0 hover:bg-muted/30">
-                                      <td className="p-1.5 pl-2 font-mono font-medium">{chunk.geohash}</td>
-                                      <td className="p-1.5 font-mono text-muted-foreground">
-                                        {chunk.status === "error" ? (
-                                          <span className="text-red-600">error</span>
-                                        ) : chunk.file ? (
-                                          <a
-                                            href={`${serverConfig?.baseURL || ""}/${chunk.file.replace(".pmtiles", "")}`}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="hover:underline hover:text-foreground transition-colors"
-                                          >
-                                            {`${chunk.file.replace(".pmtiles", "").slice(0, 10)}...`}
-                                          </a>
-                                        ) : "-"}
-                                      </td>
-                                      <td className="p-1.5 text-right text-muted-foreground">
-                                        {chunk.size ? formatBytes(chunk.size) : "-"}
-                                      </td>
-                                      <td className="p-1.5 pr-2 text-right">
-                                        {chunk.status === "done" && layer.status !== "chunking" && (
-                                          <button
-                                            onClick={() => handleDeleteChunk(layer.id, chunk.geohash)}
-                                            className="text-muted-foreground hover:text-destructive transition-colors"
-                                            title="Delete chunk"
-                                          >
-                                            <Trash2 className="h-3 w-3" />
-                                          </button>
-                                        )}
-                                      </td>
-                                    </tr>
-                                  ))}
+                                  {allEntries.map(chunk => {
+                                    const depth = Math.max(0, (chunk.geohash?.length || 0) - basePrecision);
+                                    const isChild = depth > 0 && !chunk.isParent;
+                                    return (
+                                      <tr key={chunk.geohash || "(world)"} className={`border-b last:border-0 hover:bg-muted/30 ${chunk.isParent ? "bg-muted/10" : ""}`}>
+                                        <td className="p-1.5 font-mono font-medium" style={{ paddingLeft: `${8 + depth * 16}px` }}>
+                                          {isChild && <span className="text-muted-foreground mr-1">{"\u2514"}</span>}
+                                          {chunk.geohash || "(world)"}
+                                          {chunk.isParent && <span className="text-muted-foreground font-normal ml-1.5 text-[10px]">subdivided</span>}
+                                        </td>
+                                        <td className="p-1.5 font-mono text-muted-foreground">
+                                          {chunk.isParent ? (
+                                            <span className="text-muted-foreground/50">-</span>
+                                          ) : chunk.status === "error" ? (
+                                            <span className="text-red-600">error</span>
+                                          ) : chunk.file ? (
+                                            <a
+                                              href={`${serverConfig?.baseURL || ""}/${chunk.file.replace(".pmtiles", "")}`}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              className="hover:underline hover:text-foreground transition-colors"
+                                            >
+                                              {`${chunk.file.replace(".pmtiles", "").slice(0, 10)}...`}
+                                            </a>
+                                          ) : "-"}
+                                        </td>
+                                        <td className="p-1.5 text-right text-muted-foreground">
+                                          {chunk.isParent ? (
+                                            <span className="text-muted-foreground/50">-</span>
+                                          ) : chunk.size ? formatBytes(chunk.size) : "-"}
+                                        </td>
+                                        <td className="p-1.5 pr-2 text-right">
+                                          {!chunk.isParent && chunk.status === "done" && layer.status !== "chunking" && (
+                                            <button
+                                              onClick={() => handleDeleteChunk(layer.id, chunk.geohash)}
+                                              className="text-muted-foreground hover:text-destructive transition-colors"
+                                              title="Delete chunk"
+                                            >
+                                              <Trash2 className="h-3 w-3" />
+                                            </button>
+                                          )}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
                                 </tbody>
                               </table>
                             </div>

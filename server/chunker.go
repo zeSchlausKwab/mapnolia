@@ -316,9 +316,13 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 		}
 
 		bbox := geohashToBBox(gh)
-		outputPath := filepath.Join(c.outputDir, fmt.Sprintf("%s.pmtiles", gh))
+		ghLabel := gh
+		if ghLabel == "" {
+			ghLabel = "world"
+		}
+		outputPath := filepath.Join(c.outputDir, fmt.Sprintf("%s.pmtiles", ghLabel))
 
-		job.CurrentTask = fmt.Sprintf("Extracting geohash %s (z%d-%d)", gh, layer.MinZoom, layer.MaxZoom)
+		job.CurrentTask = fmt.Sprintf("Extracting geohash %s (z%d-%d)", ghLabel, layer.MinZoom, layer.MaxZoom)
 
 		if err := c.extractRegion(ctx, inputPath, outputPath, bbox, layer.MinZoom, layer.MaxZoom); err != nil {
 			slog.Error("failed to extract region", "geohash", gh, "error", err)
@@ -648,7 +652,7 @@ var base32 = "0123456789bcdefghjkmnpqrstuvwxyz"
 
 func generateGeohashes(precision int) []string {
 	if precision <= 0 {
-		precision = 1
+		return []string{""} // Single chunk covering entire world
 	}
 	if precision > 4 {
 		precision = 4 // Limit to prevent too many chunks
