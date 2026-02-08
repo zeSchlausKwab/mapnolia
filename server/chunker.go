@@ -229,7 +229,7 @@ func findPmtilesBinary() (string, error) {
 // StartChunking begins chunking a layer
 func (c *Chunker) StartChunking(ctx context.Context, layer *MapLayer, source *Source) error {
 	c.mu.Lock()
-	if _, exists := c.jobs[layer.ID]; exists {
+	if existing, exists := c.jobs[layer.ID]; exists && existing.Status == "chunking" {
 		c.mu.Unlock()
 		return fmt.Errorf("chunking already in progress for layer %s", layer.ID)
 	}
@@ -321,10 +321,22 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 			continue
 		}
 
-		// Calculate SHA256 and rename to content-addressed name
-		hash, err := hashFile(outputPath)
+		// Register with blisk store so Blossom can serve the file
+		f, err := os.Open(outputPath)
 		if err != nil {
-			slog.Error("failed to hash file", "path", outputPath, "error", err)
+			slog.Error("failed to open extracted file", "path", outputPath, "error", err)
+			job.Chunks = append(job.Chunks, ChunkResult{
+				Geohash: gh, Status: "error", Error: err.Error(),
+			})
+			job.DoneChunks = i + 1
+			job.Progress = float64(i+1) / float64(len(geohashes)) * 100
+			continue
+		}
+		meta, err := store.Save(ctx, f, "blosmap")
+		f.Close()
+		os.Remove(outputPath) // Clean up temp extract file
+		if err != nil {
+			slog.Error("failed to save to store", "geohash", gh, "error", err)
 			job.Chunks = append(job.Chunks, ChunkResult{
 				Geohash: gh, Status: "error", Error: err.Error(),
 			})
@@ -333,21 +345,8 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 			continue
 		}
 
-		finalPath := filepath.Join(c.outputDir, fmt.Sprintf("%s.pmtiles", hash))
-		if outputPath != finalPath {
-			if _, err := os.Stat(finalPath); os.IsNotExist(err) {
-				os.Rename(outputPath, finalPath)
-			} else {
-				os.Remove(outputPath) // Duplicate content
-			}
-		}
-
-		// Get file size
-		info, _ := os.Stat(finalPath)
-		size := int64(0)
-		if info != nil {
-			size = info.Size()
-		}
+		hash := meta.Hash.Hex()
+		size := meta.Size
 
 		// Build chunk info
 		chunkInfo := ChunkInfo{

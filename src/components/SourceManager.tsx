@@ -706,7 +706,14 @@ export function SourceManager() {
                                         {chunk.status === "error" ? (
                                           <span className="text-red-600">error</span>
                                         ) : chunk.file ? (
-                                          `${chunk.file.replace(".pmtiles", "").slice(0, 10)}...`
+                                          <a
+                                            href={`${serverConfig?.baseURL || ""}/${chunk.file.replace(".pmtiles", "")}`}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="hover:underline hover:text-foreground transition-colors"
+                                          >
+                                            {`${chunk.file.replace(".pmtiles", "").slice(0, 10)}...`}
+                                          </a>
                                         ) : "-"}
                                       </td>
                                       <td className="p-1.5 text-right text-muted-foreground">

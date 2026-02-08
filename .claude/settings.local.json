@@ -18,7 +18,9 @@
       "Bash(bunx tsc:*)",
       "Bash(bun build:*)",
       "Bash(node -e:*)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(go env:*)",
+      "Bash(find:*)"
     ]
   }
 }

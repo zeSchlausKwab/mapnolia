@@ -329,6 +329,7 @@ func handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"name":       config.Name,
 		"about":      config.About,
 		"picture":    config.Picture,
+		"baseURL":    config.BaseURL,
 		"relays":     config.Relays,
 		"diskQuota":  config.DiskQuota,
 		"hasKeypair": config.PrivateKey != "",
@@ -447,11 +448,8 @@ func handleRemoveChunk(w http.ResponseWriter, r *http.Request, geohash string) {
 		return
 	}
 
-	// Delete the file from disk
-	filePath := filepath.Join(config.DataDir, "chunks", chunk.File)
-	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
-		slog.Error("failed to delete chunk file", "path", filePath, "error", err)
-	}
+	// Delete from blossom store
+	deleteChunkFromStore(chunk.File)
 
 	// Remove from announcement
 	delete(announcement, geohash)
@@ -736,13 +734,10 @@ func handleDeleteLayer(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	// Delete chunk files from disk and remove from announcement
+	// Delete chunk files from store and remove from announcement
 	announcement, _ := loadAnnouncement()
 	for gh, chunk := range deletedLayer.Chunks {
-		filePath := filepath.Join(config.DataDir, "chunks", chunk.File)
-		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
-			slog.Error("failed to delete chunk file", "path", filePath, "error", err)
-		}
+		deleteChunkFromStore(chunk.File)
 		delete(announcement, gh)
 	}
 	if err := saveAnnouncement(announcement); err != nil {
@@ -790,11 +785,8 @@ func handleDeleteLayerChunk(w http.ResponseWriter, r *http.Request, layerID, geo
 		return
 	}
 
-	// Delete file from disk
-	filePath := filepath.Join(config.DataDir, "chunks", chunk.File)
-	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
-		slog.Error("failed to delete chunk file", "path", filePath, "error", err)
-	}
+	// Delete file from store
+	deleteChunkFromStore(chunk.File)
 
 	// Remove from layer config
 	delete(config.MapLayers[layerIdx].Chunks, geohash)
@@ -907,6 +899,25 @@ func handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(downloads)
+}
+
+// ============================================================================
+// Store Helpers
+// ============================================================================
+
+// deleteChunkFromStore removes a chunk file from the blisk store by parsing its hash from the filename
+func deleteChunkFromStore(filename string) {
+	hexHash := strings.TrimSuffix(filename, ".pmtiles")
+	hash, err := blossom.ParseHash(hexHash)
+	if err != nil {
+		slog.Error("failed to parse hash for deletion", "filename", filename, "error", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := store.Delete(ctx, hash, "blosmap"); err != nil {
+		slog.Error("failed to delete from store", "hash", hexHash, "error", err)
+	}
 }
 
 // ============================================================================

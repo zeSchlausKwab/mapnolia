@@ -32,6 +32,7 @@ export interface Config {
   name: string;
   about: string;
   picture: string;
+  baseURL: string;
   relays: string[];
   maxZoom: number;
   diskQuota: number;
