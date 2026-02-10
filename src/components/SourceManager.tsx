@@ -103,7 +103,7 @@ export function SourceManager() {
       } catch (e) {
         // Ignore polling errors
       }
-    }, 2000);
+    }, 1000);
 
     return () => clearInterval(interval);
   }, []);
@@ -744,10 +744,10 @@ export function SourceManager() {
                         )}
                       </div>
 
-                      {/* Persisted chunks table — always shown when chunks exist */}
+                      {/* Persisted chunks table — always shown when chunks exist or actively chunking */}
                       {(() => {
                         // During chunking, merge persisted chunks with live job data
-                        type ChunkEntry = { geohash: string; file: string; size: number; status: "done" | "error" | "extracting"; isParent?: boolean };
+                        type ChunkEntry = { geohash: string; file: string; size: number; status: "done" | "error" | "extracting"; isParent?: boolean; isActive?: boolean; percent?: number; bytesInfo?: string };
                         const leafEntries: ChunkEntry[] = [];
 
                         if (layer.chunks) {
@@ -768,6 +768,20 @@ export function SourceManager() {
                               leafEntries.push({ geohash: jc.geohash, file: "", size: 0, status: "error" });
                             }
                           }
+                        }
+
+                        // Add currently-extracting chunk as an active row
+                        const activeChunk = job?.currentChunk;
+                        if (activeChunk && !leafEntries.some(c => c.geohash === activeChunk.geohash)) {
+                          leafEntries.push({
+                            geohash: activeChunk.geohash,
+                            file: "",
+                            size: 0,
+                            status: "extracting",
+                            isActive: true,
+                            percent: activeChunk.percent,
+                            bytesInfo: activeChunk.bytesInfo,
+                          });
                         }
 
                         if (leafEntries.length === 0) return null;
@@ -801,12 +815,14 @@ export function SourceManager() {
 
                         allEntries.sort((a, b) => a.geohash.localeCompare(b.geohash));
 
+                        const leafCount = leafEntries.filter(c => !c.isActive).length;
+
                         return (
                           <div className="space-y-1.5">
                             <span className="text-xs text-muted-foreground font-medium">
-                              Chunks ({leafEntries.length})
+                              Chunks ({leafCount})
                             </span>
-                            <div className="max-h-64 overflow-auto rounded border bg-muted/20">
+                            <div className="max-h-96 overflow-auto rounded border bg-muted/20">
                               <table className="w-full text-xs">
                                 <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm">
                                   <tr className="border-b text-muted-foreground">
@@ -820,6 +836,40 @@ export function SourceManager() {
                                   {allEntries.map(chunk => {
                                     const depth = Math.max(0, (chunk.geohash?.length || 0) - basePrecision);
                                     const isChild = depth > 0 && !chunk.isParent;
+
+                                    // Active download row with progress bar
+                                    if (chunk.isActive) {
+                                      return (
+                                        <tr key={`active-${chunk.geohash}`} ref={el => { if (el) el.scrollIntoView({ block: "nearest", behavior: "smooth" }); }} className="border-b bg-blue-50 dark:bg-blue-950/30">
+                                          <td className="p-1.5 font-mono font-medium" style={{ paddingLeft: `${8 + depth * 16}px` }}>
+                                            {isChild && <span className="text-muted-foreground mr-1">{"\u2514"}</span>}
+                                            <span className="text-blue-600 dark:text-blue-400">{chunk.geohash || "(world)"}</span>
+                                          </td>
+                                          <td colSpan={2} className="p-1.5">
+                                            <div className="flex items-center gap-2">
+                                              <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
+                                                <div
+                                                  className="h-full bg-blue-500 transition-all duration-300"
+                                                  style={{ width: `${chunk.percent || 0}%` }}
+                                                />
+                                              </div>
+                                              <span className="text-[10px] text-blue-600 dark:text-blue-400 font-mono whitespace-nowrap min-w-[3ch] text-right">
+                                                {chunk.percent || 0}%
+                                              </span>
+                                            </div>
+                                            {chunk.bytesInfo && (
+                                              <div className="text-[10px] text-muted-foreground mt-0.5 font-mono">
+                                                {chunk.bytesInfo}
+                                              </div>
+                                            )}
+                                          </td>
+                                          <td className="p-1.5 pr-2">
+                                            <Loader2 className="h-3 w-3 animate-spin text-blue-500" />
+                                          </td>
+                                        </tr>
+                                      );
+                                    }
+
                                     return (
                                       <tr key={chunk.geohash || "(world)"} className={`border-b last:border-0 hover:bg-muted/30 ${chunk.isParent ? "bg-muted/10" : ""}`}>
                                         <td className="p-1.5 font-mono font-medium" style={{ paddingLeft: `${8 + depth * 16}px` }}>

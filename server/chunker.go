@@ -34,17 +34,25 @@ type ChunkResult struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// ChunkProgress tracks the download progress of the currently extracting chunk
+type ChunkProgress struct {
+	Geohash   string `json:"geohash"`
+	Percent   int    `json:"percent"`
+	BytesInfo string `json:"bytesInfo,omitempty"` // e.g. "(64 MB/152 MB, 4.2 MB/s)"
+}
+
 // ChunkJob tracks a chunking operation
 type ChunkJob struct {
-	SourceID     string        `json:"sourceId"`
-	Status       string        `json:"status"` // pending, chunking, ready, error
-	Progress     float64       `json:"progress"`
-	Error        string        `json:"error,omitempty"`
-	TotalChunks  int           `json:"totalChunks"`
-	DoneChunks   int           `json:"doneChunks"`
-	CurrentTask  string        `json:"currentTask,omitempty"`
-	Chunks       []ChunkResult `json:"chunks,omitempty"`
-	Subdivisions int           `json:"subdivisions"` // count of subdivision operations performed
+	SourceID     string         `json:"sourceId"`
+	Status       string         `json:"status"` // pending, chunking, ready, error
+	Progress     float64        `json:"progress"`
+	Error        string         `json:"error,omitempty"`
+	TotalChunks  int            `json:"totalChunks"`
+	DoneChunks   int            `json:"doneChunks"`
+	CurrentTask  string         `json:"currentTask,omitempty"`
+	CurrentChunk *ChunkProgress `json:"currentChunk,omitempty"`
+	Chunks       []ChunkResult  `json:"chunks,omitempty"`
+	Subdivisions int            `json:"subdivisions"` // count of subdivision operations performed
 }
 
 // PMTilesHeader represents metadata from a PMTiles file
@@ -324,7 +332,7 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 
 		job.CurrentTask = fmt.Sprintf("Extracting geohash %s (z%d-%d)", ghLabel, layer.MinZoom, layer.MaxZoom)
 
-		if err := c.extractRegion(ctx, inputPath, outputPath, bbox, layer.MinZoom, layer.MaxZoom); err != nil {
+		if err := c.extractRegion(ctx, inputPath, outputPath, bbox, layer.MinZoom, layer.MaxZoom, job, ghLabel); err != nil {
 			slog.Error("failed to extract region", "geohash", gh, "error", err)
 			job.Chunks = append(job.Chunks, ChunkResult{
 				Geohash: gh, Status: "error", Error: err.Error(),
@@ -414,7 +422,7 @@ func (c *Chunker) processSubdivision(
 		job.CurrentTask = fmt.Sprintf("Extracting %s from parent %s", childGH, parentGH)
 
 		// Extract from parent file (local), not from remote source
-		if err := c.extractRegion(ctx, parentPath, childPath, childBBox, layer.MinZoom, layer.MaxZoom); err != nil {
+		if err := c.extractRegion(ctx, parentPath, childPath, childBBox, layer.MinZoom, layer.MaxZoom, job, childGH); err != nil {
 			slog.Error("failed to extract child region", "geohash", childGH, "error", err)
 			job.Chunks = append(job.Chunks, ChunkResult{
 				Geohash: childGH, Status: "error", Error: err.Error(),
@@ -538,7 +546,7 @@ func (c *Chunker) registerLeafChunk(
 }
 
 
-func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox [4]float64, minZoom, maxZoom int) error {
+func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox [4]float64, minZoom, maxZoom int, job *ChunkJob, ghLabel string) error {
 	if c.pmtilesBin == "" {
 		return fmt.Errorf("pmtiles binary not configured")
 	}
@@ -557,11 +565,90 @@ func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox 
 	cmd := exec.CommandContext(ctx, c.pmtilesBin, args...)
 	cmd.Stderr = os.Stderr
 
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("pmtiles extract failed: %w", err)
+	// Set current chunk progress before starting
+	job.CurrentChunk = &ChunkProgress{Geohash: ghLabel, Percent: 0}
+
+	// Capture stdout to parse progress bar output from pmtiles
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		job.CurrentChunk = nil
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		job.CurrentChunk = nil
+		return fmt.Errorf("pmtiles extract failed to start: %w", err)
+	}
+
+	// Read stdout in background, parse \r-delimited progress lines
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		var lineBuf []byte
+		for {
+			n, readErr := stdout.Read(buf)
+			if n > 0 {
+				for _, b := range buf[:n] {
+					if b == '\r' || b == '\n' {
+						line := strings.TrimSpace(string(lineBuf))
+						lineBuf = lineBuf[:0]
+						if pct, info, ok := parseProgressLine(line); ok {
+							job.CurrentTask = fmt.Sprintf("Extracting %s — %d%% %s", ghLabel, pct, info)
+							job.CurrentChunk = &ChunkProgress{
+								Geohash:   ghLabel,
+								Percent:   pct,
+								BytesInfo: info,
+							}
+						}
+					} else {
+						lineBuf = append(lineBuf, b)
+					}
+				}
+			}
+			if readErr != nil {
+				break
+			}
+		}
+	}()
+
+	waitErr := cmd.Wait()
+	<-done // ensure reader goroutine finishes
+	job.CurrentChunk = nil
+
+	if waitErr != nil {
+		return fmt.Errorf("pmtiles extract failed: %w", waitErr)
 	}
 
 	return nil
+}
+
+// parseProgressLine extracts percentage and byte stats from a pmtiles progress line.
+// Example input: "fetching chunks  42% |████████| (64 MB/152 MB, 4.2 MB/s) [12s:25s]"
+func parseProgressLine(line string) (pct int, info string, ok bool) {
+	// Find percentage: look for "XX%" pattern
+	pctIdx := strings.Index(line, "%")
+	if pctIdx < 1 {
+		return 0, "", false
+	}
+	// Walk back from % to find the number
+	numStart := pctIdx - 1
+	for numStart > 0 && line[numStart-1] >= '0' && line[numStart-1] <= '9' {
+		numStart--
+	}
+	if numStart == pctIdx {
+		return 0, "", false
+	}
+	fmt.Sscanf(line[numStart:pctIdx], "%d", &pct)
+
+	// Find parenthesized byte stats: "(XX MB/YY MB, Z MB/s)"
+	parenStart := strings.Index(line, "(")
+	parenEnd := strings.LastIndex(line, ")")
+	if parenStart >= 0 && parenEnd > parenStart {
+		info = line[parenStart : parenEnd+1]
+	}
+
+	return pct, info, true
 }
 
 // GetJob returns the current job status for a source

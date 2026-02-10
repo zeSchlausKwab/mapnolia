@@ -162,6 +162,12 @@ export interface ChunkResult {
   error?: string;
 }
 
+export interface ChunkProgress {
+  geohash: string;
+  percent: number;
+  bytesInfo?: string;  // e.g. "(64 MB/152 MB, 4.2 MB/s)"
+}
+
 export interface ChunkJob {
   sourceId: string;
   status: string;
@@ -170,6 +176,7 @@ export interface ChunkJob {
   totalChunks: number;
   doneChunks: number;
   currentTask?: string;
+  currentChunk?: ChunkProgress;
   chunks?: ChunkResult[];
   subdivisions?: number;  // count of subdivision operations performed
 }

@@ -21,7 +21,12 @@
       "Bash(git rm:*)",
       "Bash(go env:*)",
       "Bash(find:*)",
-      "Bash(go vet:*)"
+      "Bash(go vet:*)",
+      "Bash(pmtiles extract --help:*)",
+      "Bash(pmtiles extract:*)",
+      "Bash(pmtiles show:*)",
+      "Bash(gh search code:*)",
+      "Bash(gh api:*)"
     ]
   }
 }
