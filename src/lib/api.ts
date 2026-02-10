@@ -210,6 +210,16 @@ export async function addSource(source: { id: string; url: string; title?: strin
   return res.json();
 }
 
+export async function updateSource(id: string, updates: { url?: string; title?: string }): Promise<Source> {
+  const res = await fetch(`${API_BASE}/sources/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) throw new Error("Failed to update source");
+  return res.json();
+}
+
 export async function deleteSource(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/sources/${id}`, {
     method: "DELETE",
@@ -270,6 +280,20 @@ export async function getLayerStatus(id: string): Promise<ChunkJob> {
   const res = await fetch(`${API_BASE}/layers/${id}/status`);
   if (!res.ok) throw new Error("Failed to get status");
   return res.json();
+}
+
+export async function retryChunk(layerId: string, geohash: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/layers/${layerId}/chunks/${geohash}/retry`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to retry chunk");
+}
+
+export async function retryLayerErrors(layerId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/layers/${layerId}/retry-errors`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to retry errors");
 }
 
 // ============================================================================

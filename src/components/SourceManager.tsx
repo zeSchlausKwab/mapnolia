@@ -18,6 +18,7 @@ import {
 import {
   getSources,
   addSource,
+  updateSource,
   deleteSource,
   refreshSourceMetadata,
   getLayers,
@@ -26,6 +27,9 @@ import {
   deleteLayerChunk,
   startLayerChunking,
   getLayerStatus,
+  retryChunk,
+  retryLayerErrors,
+  getAnnouncementPreview,
   getConfig,
   formatBytes,
   type Source,
@@ -33,8 +37,7 @@ import {
   type ChunkJob,
   type Config,
 } from "@/lib/api";
-import NDK, { type NDKFilter } from "@nostr-dev-kit/ndk";
-import { ChevronDown, ChevronRight, Plus, RefreshCw, Loader2, Database, Layers, Trash2, Play, Radio } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, RefreshCw, Loader2, Database, Layers, Trash2, Play, Radio, Pencil, Check, X } from "lucide-react";
 
 export function SourceManager() {
   const [sources, setSources] = useState<Source[]>([]);
@@ -55,6 +58,10 @@ export function SourceManager() {
   const [newLayer, setNewLayer] = useState({ id: "", title: "", sourceId: "", minZoom: 0, maxZoom: 14, precision: 1, maxChunkSize: 0, maxPrecision: 2 });
   const [submitting, setSubmitting] = useState(false);
   const [startingLayers, setStartingLayers] = useState<Set<string>>(new Set());
+
+  // Source editing
+  const [editingSourceUrl, setEditingSourceUrl] = useState<string | null>(null); // source ID being edited
+  const [editUrlValue, setEditUrlValue] = useState("");
 
   // Announcement viewer
   const [announcementEvent, setAnnouncementEvent] = useState<any>(null);
@@ -153,6 +160,17 @@ export function SourceManager() {
     }
   }
 
+  async function handleUpdateSourceUrl(id: string) {
+    if (!editUrlValue.trim()) return;
+    try {
+      await updateSource(id, { url: editUrlValue.trim() });
+      setEditingSourceUrl(null);
+      await loadData();
+    } catch (e) {
+      setError("Failed to update source URL");
+    }
+  }
+
   async function handleRefreshMetadata(id: string) {
     try {
       await refreshSourceMetadata(id);
@@ -232,6 +250,48 @@ export function SourceManager() {
     }
   }
 
+  async function handleRetryChunk(layerId: string, geohash: string) {
+    setStartingLayers(prev => new Set(prev).add(layerId));
+    try {
+      await retryChunk(layerId, geohash);
+      setOpenLayers(prev => ({ ...prev, [layerId]: true }));
+      await loadData();
+      try {
+        const job = await getLayerStatus(layerId);
+        setJobs(prev => ({ ...prev, [layerId]: job }));
+      } catch {}
+    } catch (e) {
+      setError("Failed to retry chunk");
+    } finally {
+      setStartingLayers(prev => {
+        const next = new Set(prev);
+        next.delete(layerId);
+        return next;
+      });
+    }
+  }
+
+  async function handleRetryErrors(layerId: string) {
+    setStartingLayers(prev => new Set(prev).add(layerId));
+    try {
+      await retryLayerErrors(layerId);
+      setOpenLayers(prev => ({ ...prev, [layerId]: true }));
+      await loadData();
+      try {
+        const job = await getLayerStatus(layerId);
+        setJobs(prev => ({ ...prev, [layerId]: job }));
+      } catch {}
+    } catch (e) {
+      setError("Failed to retry errors");
+    } finally {
+      setStartingLayers(prev => {
+        const next = new Set(prev);
+        next.delete(layerId);
+        return next;
+      });
+    }
+  }
+
   function getSourceForLayer(sourceId: string): Source | undefined {
     return sources.find(s => s.id === sourceId);
   }
@@ -262,74 +322,16 @@ export function SourceManager() {
     }));
   }
 
-  async function fetchAnnouncementFromRelay() {
-    if (!serverConfig) return;
+  async function fetchAnnouncementPreview() {
     setAnnouncementLoading(true);
     setAnnouncementError(null);
     setAnnouncementEvent(null);
 
     try {
-      const ndk = new NDK({
-        explicitRelayUrls: serverConfig.relays || ["ws://localhost:10547"],
-      });
-      await ndk.connect();
-
-      // Need npub to get pubkey hex for filter
-      const npub = serverConfig.npub;
-      if (!npub) {
-        setAnnouncementError("No keypair configured on server");
-        setAnnouncementLoading(false);
-        return;
-      }
-
-      // Decode npub to hex pubkey
-      let pubkeyHex: string;
-      try {
-        const { decode } = await import("nostr-tools/nip19");
-        const decoded = decode(npub);
-        pubkeyHex = decoded.data as string;
-      } catch {
-        setAnnouncementError("Failed to decode npub");
-        setAnnouncementLoading(false);
-        return;
-      }
-
-      const filter: NDKFilter = {
-        kinds: [34444 as any],
-        authors: [pubkeyHex],
-        "#d": ["blosmap"],
-        limit: 1,
-      };
-
-      const events = await ndk.fetchEvents(filter);
-      const eventArray = Array.from(events);
-
-      if (eventArray.length === 0) {
-        setAnnouncementError("No announcement event found on relay");
-      } else {
-        const evt = eventArray[0]!;
-        // Build a clean representation
-        const eventObj: any = {
-          id: evt.id,
-          pubkey: evt.pubkey,
-          created_at: evt.created_at,
-          kind: evt.kind,
-          tags: evt.tags,
-          content: evt.content,
-          sig: evt.sig,
-        };
-
-        // Try to parse content as JSON for display
-        try {
-          eventObj.content = JSON.parse(evt.content);
-        } catch {
-          // Keep as string
-        }
-
-        setAnnouncementEvent(eventObj);
-      }
+      const preview = await getAnnouncementPreview();
+      setAnnouncementEvent(preview);
     } catch (e: any) {
-      setAnnouncementError(e.message || "Failed to fetch from relay");
+      setAnnouncementError(e.message || "Failed to fetch announcement preview");
     } finally {
       setAnnouncementLoading(false);
     }
@@ -391,7 +393,7 @@ export function SourceManager() {
             <div className="flex gap-2">
               <Dialog>
                 <DialogTrigger asChild>
-                  <Button variant="outline" size="sm" onClick={fetchAnnouncementFromRelay}>
+                  <Button variant="outline" size="sm" onClick={fetchAnnouncementPreview}>
                     <Radio className="h-4 w-4 mr-2" />
                     View Announcement
                   </Button>
@@ -675,6 +677,14 @@ export function SourceManager() {
                             {startingLayers.has(layer.id) ? "Starting..." : "Start Chunking"}
                           </Button>
                         )}
+                        {(layer.status === "ready" || layer.status === "error") && (
+                          <Button size="sm" variant="outline" onClick={() => handleRetryErrors(layer.id)} disabled={startingLayers.has(layer.id)}>
+                            {startingLayers.has(layer.id)
+                              ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                              : <RefreshCw className="h-3 w-3 mr-1" />}
+                            Retry Errors
+                          </Button>
+                        )}
                         {layer.status === "chunking" && (
                           <span className="flex items-center gap-1.5 text-xs text-muted-foreground px-2">
                             <Loader2 className="h-3 w-3 animate-spin" />
@@ -899,14 +909,25 @@ export function SourceManager() {
                                           ) : chunk.size ? formatBytes(chunk.size) : "-"}
                                         </td>
                                         <td className="p-1.5 pr-2 text-right">
-                                          {!chunk.isParent && chunk.status === "done" && layer.status !== "chunking" && (
-                                            <button
-                                              onClick={() => handleDeleteChunk(layer.id, chunk.geohash)}
-                                              className="text-muted-foreground hover:text-destructive transition-colors"
-                                              title="Delete chunk"
-                                            >
-                                              <Trash2 className="h-3 w-3" />
-                                            </button>
+                                          {layer.status !== "chunking" && (
+                                            <div className="flex items-center justify-end gap-1">
+                                              <button
+                                                onClick={() => handleRetryChunk(layer.id, chunk.geohash)}
+                                                className="text-muted-foreground hover:text-foreground transition-colors"
+                                                title={chunk.isParent ? "Re-extract region" : "Re-download chunk"}
+                                              >
+                                                <RefreshCw className="h-3 w-3" />
+                                              </button>
+                                              {!chunk.isParent && chunk.status === "done" && (
+                                                <button
+                                                  onClick={() => handleDeleteChunk(layer.id, chunk.geohash)}
+                                                  className="text-muted-foreground hover:text-destructive transition-colors"
+                                                  title="Delete chunk"
+                                                >
+                                                  <Trash2 className="h-3 w-3" />
+                                                </button>
+                                              )}
+                                            </div>
                                           )}
                                         </td>
                                       </tr>
@@ -1058,10 +1079,48 @@ export function SourceManager() {
 
                   <CollapsibleContent>
                     <div className="border-t bg-muted/30 p-4 space-y-3">
-                      {/* URL */}
+                      {/* URL — editable */}
                       <div className="text-xs">
                         <span className="text-muted-foreground">URL: </span>
-                        <span className="font-mono break-all">{source.url}</span>
+                        {editingSourceUrl === source.id ? (
+                          <div className="flex items-center gap-1.5 mt-1">
+                            <Input
+                              value={editUrlValue}
+                              onChange={e => setEditUrlValue(e.target.value)}
+                              onKeyDown={e => {
+                                if (e.key === "Enter") handleUpdateSourceUrl(source.id);
+                                if (e.key === "Escape") setEditingSourceUrl(null);
+                              }}
+                              className="h-7 text-xs font-mono flex-1"
+                              autoFocus
+                            />
+                            <button
+                              onClick={() => handleUpdateSourceUrl(source.id)}
+                              className="text-green-600 hover:text-green-700 transition-colors"
+                              title="Save"
+                            >
+                              <Check className="h-4 w-4" />
+                            </button>
+                            <button
+                              onClick={() => setEditingSourceUrl(null)}
+                              className="text-muted-foreground hover:text-foreground transition-colors"
+                              title="Cancel"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="font-mono break-all">
+                            {source.url}
+                            <button
+                              onClick={() => { setEditingSourceUrl(source.id); setEditUrlValue(source.url); }}
+                              className="ml-2 text-muted-foreground hover:text-foreground transition-colors inline-flex align-middle"
+                              title="Edit URL"
+                            >
+                              <Pencil className="h-3 w-3" />
+                            </button>
+                          </span>
+                        )}
                       </div>
 
                       {source.error && <div className="text-sm text-destructive">{source.error}</div>}

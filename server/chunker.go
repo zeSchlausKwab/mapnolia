@@ -395,6 +395,244 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 	slog.Info("chunking complete", "layer", layer.ID, "chunks", job.DoneChunks, "subdivisions", job.Subdivisions)
 }
 
+// StartRetry begins retrying specific chunks for a layer
+func (c *Chunker) StartRetry(ctx context.Context, layer *MapLayer, source *Source, geohashes []string) error {
+	c.mu.Lock()
+	if existing, exists := c.jobs[layer.ID]; exists && existing.Status == "chunking" {
+		c.mu.Unlock()
+		return fmt.Errorf("chunking already in progress for layer %s", layer.ID)
+	}
+
+	job := &ChunkJob{
+		SourceID: layer.ID,
+		Status:   "chunking",
+	}
+	c.jobs[layer.ID] = job
+	c.mu.Unlock()
+
+	// Update layer status in config immediately so frontend sees "chunking"
+	for i := range config.MapLayers {
+		if config.MapLayers[i].ID == layer.ID {
+			config.MapLayers[i].Status = "chunking"
+			break
+		}
+	}
+	config.Save("")
+
+	go c.runRetry(ctx, layer, source, job, geohashes)
+	return nil
+}
+
+func (c *Chunker) runRetry(ctx context.Context, layer *MapLayer, source *Source, job *ChunkJob, geohashes []string) {
+	defer func() {
+		for i := range config.MapLayers {
+			if config.MapLayers[i].ID == layer.ID {
+				config.MapLayers[i].Status = job.Status
+				config.MapLayers[i].Error = job.Error
+				break
+			}
+		}
+		config.Save("")
+	}()
+
+	// Resolve input
+	inputPath := source.URL
+	if !strings.HasPrefix(inputPath, "http://") && !strings.HasPrefix(inputPath, "https://") {
+		if !filepath.IsAbs(inputPath) {
+			inputPath = filepath.Join("..", inputPath)
+		}
+		if _, err := os.Stat(inputPath); err != nil {
+			job.Status = "error"
+			job.Error = fmt.Sprintf("local file not found: %s", source.URL)
+			slog.Error("failed to resolve input for retry", "layer", layer.ID, "error", err)
+			return
+		}
+	}
+
+	maxPrecision := layer.MaxPrecision
+	if maxPrecision <= 0 || maxPrecision > 4 {
+		maxPrecision = 4
+	}
+
+	job.TotalChunks = len(geohashes)
+	job.Status = "chunking"
+
+	slog.Info("starting retry",
+		"layer", layer.ID,
+		"source", source.ID,
+		"chunks", len(geohashes),
+	)
+
+	announcement, _ := loadAnnouncement()
+
+	for _, gh := range geohashes {
+		select {
+		case <-ctx.Done():
+			job.Status = "error"
+			job.Error = "cancelled"
+			return
+		default:
+		}
+
+		// Clean up old entry and any children before re-extracting
+		cleanupChunkAndChildren(gh, layer.ID, announcement)
+
+		bbox := geohashToBBox(gh)
+		ghLabel := gh
+		if ghLabel == "" {
+			ghLabel = "world"
+		}
+		outputPath := filepath.Join(c.outputDir, fmt.Sprintf("%s.pmtiles", ghLabel))
+
+		job.CurrentTask = fmt.Sprintf("Retrying %s (z%d-%d)", ghLabel, layer.MinZoom, layer.MaxZoom)
+
+		if err := c.extractRegion(ctx, inputPath, outputPath, bbox, layer.MinZoom, layer.MaxZoom, job, ghLabel); err != nil {
+			slog.Error("failed to extract region (retry)", "geohash", gh, "error", err)
+			job.Chunks = append(job.Chunks, ChunkResult{
+				Geohash: gh, Status: "error", Error: err.Error(),
+			})
+			job.DoneChunks++
+			job.Progress = float64(job.DoneChunks) / float64(job.TotalChunks) * 100
+			continue
+		}
+
+		fileInfo, err := os.Stat(outputPath)
+		if err != nil {
+			slog.Error("failed to stat extracted file (retry)", "path", outputPath, "error", err)
+			job.Chunks = append(job.Chunks, ChunkResult{
+				Geohash: gh, Status: "error", Error: err.Error(),
+			})
+			job.DoneChunks++
+			job.Progress = float64(job.DoneChunks) / float64(job.TotalChunks) * 100
+			continue
+		}
+
+		needsSubdivision := layer.MaxChunkSize > 0 &&
+			fileInfo.Size() > layer.MaxChunkSize &&
+			len(gh) < maxPrecision
+
+		if needsSubdivision {
+			slog.Info("retry chunk exceeds threshold, subdividing",
+				"geohash", gh,
+				"size", formatSize(fileInfo.Size()),
+				"threshold", formatSize(layer.MaxChunkSize),
+			)
+			job.CurrentTask = fmt.Sprintf("Subdividing %s (%s > %s)", gh, formatSize(fileInfo.Size()), formatSize(layer.MaxChunkSize))
+			job.Subdivisions++
+			job.TotalChunks += 31
+
+			c.processSubdivision(ctx, gh, outputPath, layer, job, announcement, maxPrecision)
+
+			os.Remove(outputPath)
+		} else {
+			c.registerLeafChunk(ctx, gh, outputPath, bbox, layer, job, announcement)
+		}
+
+		config.Save("")
+		if err := saveAnnouncement(announcement); err != nil {
+			slog.Error("failed to save announcement", "error", err)
+		} else {
+			go func() {
+				pubCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				PublishAnnouncement(pubCtx)
+			}()
+		}
+	}
+
+	job.Status = "ready"
+	slog.Info("retry complete", "layer", layer.ID, "chunks", job.DoneChunks, "subdivisions", job.Subdivisions)
+}
+
+// cleanupChunkAndChildren removes a chunk and all its descendants from the layer config, store, and announcement
+func cleanupChunkAndChildren(gh string, layerID string, announcement map[string]ChunkInfo) {
+	for idx := range config.MapLayers {
+		if config.MapLayers[idx].ID != layerID {
+			continue
+		}
+		chunks := config.MapLayers[idx].Chunks
+		if chunks == nil {
+			return
+		}
+
+		// Delete the chunk itself
+		if info, exists := chunks[gh]; exists {
+			deleteChunkFromStore(info.File)
+			delete(chunks, gh)
+			delete(announcement, gh)
+		}
+
+		// Delete all descendants (any geohash that starts with gh)
+		if gh != "" {
+			for childGH, childInfo := range chunks {
+				if strings.HasPrefix(childGH, gh) && childGH != gh {
+					deleteChunkFromStore(childInfo.File)
+					delete(chunks, childGH)
+					delete(announcement, childGH)
+				}
+			}
+		}
+		break
+	}
+}
+
+// FindMissingChunks returns geohashes that aren't covered in the layer.
+// First checks the most recent job for error entries, then falls back to
+// scanning for missing base-precision geohashes.
+func (c *Chunker) FindMissingChunks(layer *MapLayer) []string {
+	// Check job for error entries first
+	c.mu.Lock()
+	job := c.jobs[layer.ID]
+	c.mu.Unlock()
+
+	if job != nil && len(job.Chunks) > 0 {
+		var errored []string
+		for _, chunk := range job.Chunks {
+			if chunk.Status == "error" {
+				errored = append(errored, chunk.Geohash)
+			}
+		}
+		if len(errored) > 0 {
+			return errored
+		}
+	}
+
+	// Fall back: scan for missing base geohashes
+	baseGHs := generateGeohashes(layer.Precision)
+
+	if layer.Chunks == nil || len(layer.Chunks) == 0 {
+		return baseGHs
+	}
+
+	var missing []string
+	for _, gh := range baseGHs {
+		if isGeohashCovered(gh, layer.Chunks) {
+			continue
+		}
+		missing = append(missing, gh)
+	}
+	return missing
+}
+
+// isGeohashCovered checks if a geohash is covered by the chunks map
+// (either directly present or has at least one descendant from subdivision)
+func isGeohashCovered(gh string, chunks map[string]ChunkInfo) bool {
+	if _, exists := chunks[gh]; exists {
+		return true
+	}
+	if gh == "" {
+		// Precision 0: covered if any chunks exist at all
+		return len(chunks) > 0
+	}
+	// Check for descendants
+	for chunkGH := range chunks {
+		if strings.HasPrefix(chunkGH, gh) {
+			return true
+		}
+	}
+	return false
+}
+
 // processSubdivision recursively splits an oversized chunk into 32 children.
 // The parentPath must remain on disk until this function returns.
 func (c *Chunker) processSubdivision(
@@ -551,6 +789,9 @@ func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox 
 		return fmt.Errorf("pmtiles binary not configured")
 	}
 
+	// Remove any existing output file (from a previous failed extraction)
+	os.Remove(output)
+
 	bboxStr := fmt.Sprintf("%f,%f,%f,%f", bbox[0], bbox[1], bbox[2], bbox[3])
 
 	args := []string{
@@ -563,7 +804,10 @@ func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox 
 	}
 
 	cmd := exec.CommandContext(ctx, c.pmtilesBin, args...)
-	cmd.Stderr = os.Stderr
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+
+	slog.Debug("running pmtiles extract", "cmd", append([]string{c.pmtilesBin}, args...))
 
 	// Set current chunk progress before starting
 	job.CurrentChunk = &ChunkProgress{Geohash: ghLabel, Percent: 0}
@@ -581,6 +825,8 @@ func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox 
 	}
 
 	// Read stdout in background, parse \r-delimited progress lines
+	// Also collect non-progress lines (pmtiles may write errors to stdout)
+	var stdoutErrors []string
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -593,6 +839,9 @@ func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox 
 					if b == '\r' || b == '\n' {
 						line := strings.TrimSpace(string(lineBuf))
 						lineBuf = lineBuf[:0]
+						if line == "" {
+							continue
+						}
 						if pct, info, ok := parseProgressLine(line); ok {
 							job.CurrentTask = fmt.Sprintf("Extracting %s — %d%% %s", ghLabel, pct, info)
 							job.CurrentChunk = &ChunkProgress{
@@ -600,6 +849,8 @@ func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox 
 								Percent:   pct,
 								BytesInfo: info,
 							}
+						} else {
+							stdoutErrors = append(stdoutErrors, line)
 						}
 					} else {
 						lineBuf = append(lineBuf, b)
@@ -607,6 +858,12 @@ func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox 
 				}
 			}
 			if readErr != nil {
+				// Flush remaining buffer
+				if line := strings.TrimSpace(string(lineBuf)); line != "" {
+					if _, _, ok := parseProgressLine(line); !ok {
+						stdoutErrors = append(stdoutErrors, line)
+					}
+				}
 				break
 			}
 		}
@@ -617,6 +874,15 @@ func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox 
 	job.CurrentChunk = nil
 
 	if waitErr != nil {
+		// Collect error info from stderr and stdout
+		errMsg := strings.TrimSpace(stderrBuf.String())
+		if errMsg == "" && len(stdoutErrors) > 0 {
+			errMsg = strings.Join(stdoutErrors, "; ")
+		}
+		if errMsg != "" {
+			slog.Error("pmtiles extract failed", "ghLabel", ghLabel, "stderr", stderrBuf.String(), "stdout_errors", stdoutErrors)
+			return fmt.Errorf("pmtiles extract failed: %s", errMsg)
+		}
 		return fmt.Errorf("pmtiles extract failed: %w", waitErr)
 	}
 

@@ -149,6 +149,8 @@ func (r *Router) handleAPI(w http.ResponseWriter, req *http.Request) {
 		handleGenerateKeypair(w, req)
 	case path == "/publish" && req.Method == http.MethodPost:
 		handlePublishAnnouncement(w, req)
+	case path == "/announcement/preview" && req.Method == http.MethodGet:
+		handleAnnouncementPreview(w, req)
 	case strings.HasPrefix(path, "/chunks/") && req.Method == http.MethodPost:
 		geohash := strings.TrimPrefix(path, "/chunks/")
 		handleAddChunk(w, req, geohash)
@@ -165,6 +167,9 @@ func (r *Router) handleAPI(w http.ResponseWriter, req *http.Request) {
 		id := strings.TrimPrefix(path, "/sources/")
 		id = strings.TrimSuffix(id, "/refresh")
 		handleRefreshSourceMetadata(w, req, id)
+	case strings.HasPrefix(path, "/sources/") && req.Method == http.MethodPatch:
+		id := strings.TrimPrefix(path, "/sources/")
+		handleUpdateSource(w, req, id)
 	case strings.HasPrefix(path, "/sources/") && req.Method == http.MethodDelete:
 		id := strings.TrimPrefix(path, "/sources/")
 		handleDeleteSource(w, req, id)
@@ -174,6 +179,17 @@ func (r *Router) handleAPI(w http.ResponseWriter, req *http.Request) {
 		handleGetLayers(w, req)
 	case path == "/layers" && req.Method == http.MethodPost:
 		handleAddLayer(w, req)
+	case strings.HasPrefix(path, "/layers/") && strings.Contains(path, "/chunks/") && strings.HasSuffix(path, "/retry") && req.Method == http.MethodPost:
+		// POST /layers/{id}/chunks/{geohash}/retry
+		rest := strings.TrimPrefix(path, "/layers/")
+		parts := strings.SplitN(rest, "/chunks/", 2)
+		geohash := strings.TrimSuffix(parts[1], "/retry")
+		handleRetryChunk(w, req, parts[0], geohash)
+	case strings.HasPrefix(path, "/layers/") && strings.HasSuffix(path, "/retry-errors") && req.Method == http.MethodPost:
+		// POST /layers/{id}/retry-errors
+		id := strings.TrimPrefix(path, "/layers/")
+		id = strings.TrimSuffix(id, "/retry-errors")
+		handleRetryErrors(w, req, id)
 	case strings.HasPrefix(path, "/layers/") && strings.Contains(path, "/chunks/") && req.Method == http.MethodDelete:
 		// DELETE /layers/{id}/chunks/{geohash}
 		rest := strings.TrimPrefix(path, "/layers/")
@@ -421,6 +437,44 @@ func handlePublishAnnouncement(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "published"})
 }
 
+func handleAnnouncementPreview(w http.ResponseWriter, r *http.Request) {
+	// Build the announcement event locally (same as PublishAnnouncement but don't sign/send)
+	chunks, err := loadAnnouncement()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	announcement := LayerAnnouncement{
+		Layers: []Layer{
+			{
+				ID:             "basemap",
+				Title:          "OpenStreetMap Basemap",
+				Kind:           "chunked-vector",
+				BlossomServer:  config.BaseURL,
+				Announcement:   chunks,
+				DefaultEnabled: true,
+				DefaultOpacity: 1.0,
+			},
+		},
+	}
+
+	preview := map[string]interface{}{
+		"kind":    34444,
+		"tags":    [][]string{{"d", "blosmap"}, {"name", config.Name}, {"about", config.About}},
+		"content": announcement,
+	}
+
+	if config.PrivateKey != "" {
+		if npub, err := GetNpub(config.PrivateKey); err == nil {
+			preview["npub"] = npub
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(preview)
+}
+
 func handleAddChunk(w http.ResponseWriter, r *http.Request, geohash string) {
 	slog.Info("📍 chunk requested", "geohash", geohash)
 
@@ -595,7 +649,9 @@ func handleRefreshSourceMetadata(w http.ResponseWriter, r *http.Request, id stri
 		config.Sources[sourceIdx].Status = "error"
 		config.Sources[sourceIdx].Error = fmt.Sprintf("Failed to fetch metadata: %v", err)
 		config.Save("")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Return the source with error status instead of HTTP 500
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(config.Sources[sourceIdx])
 		return
 	}
 
@@ -617,6 +673,91 @@ func handleRefreshSourceMetadata(w http.ResponseWriter, r *http.Request, id stri
 	config.Save("")
 
 	slog.Info("📊 metadata refreshed", "source", id, "minZoom", header.MinZoom, "maxZoom", header.MaxZoom)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(config.Sources[sourceIdx])
+}
+
+func handleUpdateSource(w http.ResponseWriter, r *http.Request, id string) {
+	var updates map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	var sourceIdx int = -1
+	for i := range config.Sources {
+		if config.Sources[i].ID == id {
+			sourceIdx = i
+			break
+		}
+	}
+	if sourceIdx < 0 {
+		http.Error(w, "Source not found", http.StatusNotFound)
+		return
+	}
+
+	urlChanged := false
+	if url, ok := updates["url"].(string); ok && url != "" {
+		if url != config.Sources[sourceIdx].URL {
+			config.Sources[sourceIdx].URL = url
+			urlChanged = true
+		}
+	}
+	if title, ok := updates["title"].(string); ok {
+		config.Sources[sourceIdx].Title = title
+	}
+
+	if err := config.Save(""); err != nil {
+		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+		return
+	}
+
+	// If URL changed, re-fetch metadata in background
+	if urlChanged && chunker != nil {
+		config.Sources[sourceIdx].Status = "fetching_metadata"
+		config.Sources[sourceIdx].Error = ""
+		config.Save("")
+
+		go func() {
+			header, err := chunker.FetchPMTilesMetadata(config.Sources[sourceIdx].URL)
+			if err != nil {
+				slog.Error("failed to fetch metadata after URL update", "source", id, "error", err)
+				for i := range config.Sources {
+					if config.Sources[i].ID == id {
+						config.Sources[i].Status = "error"
+						config.Sources[i].Error = fmt.Sprintf("Failed to fetch metadata: %v", err)
+						break
+					}
+				}
+			} else {
+				for i := range config.Sources {
+					if config.Sources[i].ID == id {
+						config.Sources[i].TileType = header.TileType
+						config.Sources[i].TileCompression = header.TileCompression
+						config.Sources[i].MinZoom = header.MinZoom
+						config.Sources[i].MaxZoom = header.MaxZoom
+						config.Sources[i].Bounds = header.Bounds
+						config.Sources[i].Center = header.Center
+						config.Sources[i].NumTileEntries = header.NumTileEntries
+						config.Sources[i].NumContents = header.NumContents
+						config.Sources[i].Clustered = header.Clustered
+						config.Sources[i].InternalComp = header.InternalComp
+						config.Sources[i].Attribution = header.Attribution
+						config.Sources[i].Description = header.Description
+						config.Sources[i].VectorLayers = header.VectorLayers
+						config.Sources[i].Status = "ready"
+						config.Sources[i].Error = ""
+						slog.Info("metadata refreshed after URL update", "source", id)
+						break
+					}
+				}
+			}
+			config.Save("")
+		}()
+	}
+
+	slog.Info("source updated", "id", id, "urlChanged", urlChanged)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(config.Sources[sourceIdx])
@@ -815,6 +956,103 @@ func handleDeleteLayerChunk(w http.ResponseWriter, r *http.Request, layerID, geo
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
+func handleRetryChunk(w http.ResponseWriter, r *http.Request, layerID, geohash string) {
+	if chunker == nil {
+		http.Error(w, "Chunker not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	var layer *MapLayer
+	for i := range config.MapLayers {
+		if config.MapLayers[i].ID == layerID {
+			layer = &config.MapLayers[i]
+			break
+		}
+	}
+	if layer == nil {
+		http.Error(w, "Layer not found", http.StatusNotFound)
+		return
+	}
+
+	var source *Source
+	for i := range config.Sources {
+		if config.Sources[i].ID == layer.SourceID {
+			source = &config.Sources[i]
+			break
+		}
+	}
+	if source == nil {
+		http.Error(w, "Source not found for layer", http.StatusNotFound)
+		return
+	}
+
+	ctx := context.Background()
+	if err := chunker.StartRetry(ctx, layer, source, []string{geohash}); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	slog.Info("🔄 chunk retry started", "layer", layerID, "geohash", geohash)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "retrying"})
+}
+
+func handleRetryErrors(w http.ResponseWriter, r *http.Request, id string) {
+	if chunker == nil {
+		http.Error(w, "Chunker not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	var layer *MapLayer
+	for i := range config.MapLayers {
+		if config.MapLayers[i].ID == id {
+			layer = &config.MapLayers[i]
+			break
+		}
+	}
+	if layer == nil {
+		http.Error(w, "Layer not found", http.StatusNotFound)
+		return
+	}
+
+	missing := chunker.FindMissingChunks(layer)
+	if len(missing) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "nothing_to_retry",
+			"message": "No missing or errored chunks found",
+		})
+		return
+	}
+
+	var source *Source
+	for i := range config.Sources {
+		if config.Sources[i].ID == layer.SourceID {
+			source = &config.Sources[i]
+			break
+		}
+	}
+	if source == nil {
+		http.Error(w, "Source not found for layer", http.StatusNotFound)
+		return
+	}
+
+	ctx := context.Background()
+	if err := chunker.StartRetry(ctx, layer, source, missing); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	slog.Info("🔄 retry errors started", "layer", id, "count", len(missing))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "retrying",
+		"count":  len(missing),
+	})
 }
 
 func handleStartLayerChunking(w http.ResponseWriter, r *http.Request, id string) {
