@@ -568,7 +568,7 @@ export function SourceManager() {
                                   }))}
                                   className="h-7 w-20 text-xs text-right"
                                   min={10}
-                                  max={4096}
+                                  max={20096}
                                 />
                                 <span className="text-xs text-muted-foreground">MB</span>
                               </div>
@@ -576,7 +576,7 @@ export function SourceManager() {
                             <input
                               type="range"
                               min={10}
-                              max={4096}
+                              max={20096}
                               value={Math.round(newLayer.maxChunkSize / (1024 * 1024))}
                               onChange={e => setNewLayer(prev => ({
                                 ...prev,
@@ -586,7 +586,7 @@ export function SourceManager() {
                             />
                             <div className="flex justify-between text-[10px] text-muted-foreground">
                               <span>10 MB</span>
-                              <span>4 GB</span>
+                              <span>20 GB</span>
                             </div>
                           </div>
 
