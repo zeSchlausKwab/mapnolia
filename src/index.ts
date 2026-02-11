@@ -4,6 +4,7 @@ import index from "./index.html";
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:3544";
 
 const server = serve({
+  port: 3001,
   routes: {
     // Proxy API requests to Go backend
     "/api/*": async (req) => {

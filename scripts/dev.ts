@@ -72,7 +72,7 @@ async function main() {
   ]);
 
   console.log("\n✅ All services started:");
-  console.log("   Frontend:  http://localhost:3000");
+  console.log("   Frontend:  http://localhost:3001");
   console.log("   Backend:   http://localhost:3544");
   console.log("   Relay:     ws://localhost:10547");
   console.log("\nPress Ctrl+C to stop all services\n");

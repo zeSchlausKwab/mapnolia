@@ -220,6 +220,20 @@ func (r *Router) handleAPI(w http.ResponseWriter, req *http.Request) {
 // Blossom Storage Hooks
 // ============================================================================
 
+// seekableBlob wraps *os.File to implement both blossom.Blob and io.ReadSeeker,
+// enabling HTTP Range request support in blossom.ServeBlob.
+type seekableBlob struct {
+	file *os.File
+	size int64
+	typ  string
+}
+
+func (b *seekableBlob) Read(p []byte) (int, error)                 { return b.file.Read(p) }
+func (b *seekableBlob) Close() error                               { return b.file.Close() }
+func (b *seekableBlob) Seek(offset int64, whence int) (int64, error) { return b.file.Seek(offset, whence) }
+func (b *seekableBlob) Type() string                               { return b.typ }
+func (b *seekableBlob) Size() int64                                { return b.size }
+
 func LoadBlob(r blossy.Request, hash blossom.Hash, ext string) (blossy.BlobDelivery, *blossom.Error) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -232,10 +246,23 @@ func LoadBlob(r blossy.Request, hash blossom.Hash, ext string) (blossy.BlobDeliv
 		return nil, blossom.ErrInternal(err.Error())
 	}
 
-	blob, err := blossom.BlobFromFile(file)
+	info, err := file.Stat()
 	if err != nil {
+		file.Close()
 		return nil, blossom.ErrInternal(err.Error())
 	}
+
+	// Detect content type from first 512 bytes
+	buf := make([]byte, 512)
+	n, _ := file.Read(buf)
+	contentType := http.DetectContentType(buf[:n])
+	// Seek back to start after type detection
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		file.Close()
+		return nil, blossom.ErrInternal(err.Error())
+	}
+
+	blob := &seekableBlob{file: file, size: info.Size(), typ: contentType}
 	return blossy.Serve(blob), nil
 }
 
