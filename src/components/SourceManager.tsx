@@ -31,13 +31,15 @@ import {
   retryLayerErrors,
   getAnnouncementPreview,
   getConfig,
+  blossomUpload,
+  addFileLayer,
   formatBytes,
   type Source,
   type MapLayer,
   type ChunkJob,
   type Config,
 } from "@/lib/api";
-import { ChevronDown, ChevronRight, Plus, RefreshCw, Loader2, Database, Layers, Trash2, Play, Radio, Pencil, Check, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, RefreshCw, Loader2, Database, Layers, Trash2, Play, Radio, Pencil, Check, X, Upload, FileUp } from "lucide-react";
 
 export function SourceManager() {
   const [sources, setSources] = useState<Source[]>([]);
@@ -58,6 +60,14 @@ export function SourceManager() {
   const [newLayer, setNewLayer] = useState({ id: "", title: "", sourceId: "", minZoom: 0, maxZoom: 14, precision: 1, maxChunkSize: 0, maxPrecision: 2 });
   const [submitting, setSubmitting] = useState(false);
   const [startingLayers, setStartingLayers] = useState<Set<string>>(new Set());
+
+  // File upload
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadTitle, setUploadTitle] = useState("");
+  const [uploadId, setUploadId] = useState("");
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Source editing
   const [editingSourceUrl, setEditingSourceUrl] = useState<string | null>(null); // source ID being edited
@@ -292,6 +302,51 @@ export function SourceManager() {
     }
   }
 
+  function handleFileSelect(file: File) {
+    setUploadFile(file);
+    const name = file.name.replace(/\.pmtiles$/i, "");
+    setUploadTitle(name);
+    setUploadId(name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""));
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.endsWith(".pmtiles")) {
+      handleFileSelect(file);
+    } else {
+      setError("Please drop a .pmtiles file");
+    }
+  }
+
+  async function handleUploadFile() {
+    if (!uploadFile || !uploadId) return;
+    setSubmitting(true);
+    setUploadProgress(0);
+    try {
+      const blob = await blossomUpload(uploadFile, (pct) => setUploadProgress(pct));
+      await addFileLayer(blob.sha256, uploadId, uploadTitle);
+      setUploadFile(null);
+      setUploadTitle("");
+      setUploadId("");
+      setUploadProgress(null);
+      await loadData();
+    } catch (e: any) {
+      setError(e.message || "Upload failed");
+    } finally {
+      setSubmitting(false);
+      setUploadProgress(null);
+    }
+  }
+
+  function cancelUpload() {
+    setUploadFile(null);
+    setUploadTitle("");
+    setUploadId("");
+    setUploadProgress(null);
+  }
+
   function getSourceForLayer(sourceId: string): Source | undefined {
     return sources.find(s => s.id === sourceId);
   }
@@ -425,6 +480,21 @@ export function SourceManager() {
                   </div>
                 </DialogContent>
               </Dialog>
+              <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()}>
+                <Upload className="h-4 w-4 mr-2" />
+                Upload PMTiles
+              </Button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pmtiles"
+                className="hidden"
+                onChange={e => {
+                  const file = e.target.files?.[0];
+                  if (file) handleFileSelect(file);
+                  e.target.value = "";
+                }}
+              />
               <Button onClick={startAddingLayer} disabled={readySources.length === 0} size="sm">
                 <Plus className="h-4 w-4 mr-2" />
                 New Layer
@@ -432,7 +502,74 @@ export function SourceManager() {
             </div>
           </div>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent
+          className={`space-y-3 ${isDragging ? "ring-2 ring-primary ring-inset rounded-b-lg" : ""}`}
+          onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
+          onDragLeave={e => { e.preventDefault(); setIsDragging(false); }}
+          onDrop={handleDrop}
+        >
+          {/* File Upload Form */}
+          {uploadFile && (
+            <div className="rounded-lg border-2 border-dashed border-primary/50 bg-primary/5 p-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <h4 className="font-medium flex items-center gap-2">
+                  <FileUp className="h-4 w-4" />
+                  Upload PMTiles File
+                </h4>
+                <Button variant="ghost" size="sm" onClick={cancelUpload} disabled={submitting}>Cancel</Button>
+              </div>
+              <div className="text-xs text-muted-foreground flex items-center gap-2">
+                <span className="font-mono">{uploadFile.name}</span>
+                <span>({formatBytes(uploadFile.size)})</span>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1">
+                  <Label className="text-xs">Layer ID</Label>
+                  <Input
+                    value={uploadId}
+                    onChange={e => setUploadId(e.target.value)}
+                    placeholder="my-layer"
+                    className="h-9"
+                    disabled={submitting}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Title</Label>
+                  <Input
+                    value={uploadTitle}
+                    onChange={e => setUploadTitle(e.target.value)}
+                    placeholder="My Map Layer"
+                    className="h-9"
+                    disabled={submitting}
+                  />
+                </div>
+              </div>
+              {uploadProgress !== null && (
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>Uploading...</span>
+                    <span>{uploadProgress.toFixed(0)}%</span>
+                  </div>
+                  <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
+                    <div className="h-full bg-primary transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
+                  </div>
+                </div>
+              )}
+              <Button onClick={handleUploadFile} disabled={submitting || !uploadId} size="sm">
+                {submitting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Upload className="h-4 w-4 mr-2" />}
+                {submitting ? "Uploading..." : "Upload & Create Layer"}
+              </Button>
+            </div>
+          )}
+
+          {/* Drag overlay */}
+          {isDragging && !uploadFile && (
+            <div className="rounded-lg border-2 border-dashed border-primary bg-primary/10 p-8 text-center">
+              <FileUp className="h-8 w-8 mx-auto mb-2 text-primary" />
+              <p className="text-sm font-medium text-primary">Drop PMTiles file here</p>
+            </div>
+          )}
+
           {/* Add Layer Form */}
           {showAddLayer && (
             <div className="rounded-lg border-2 border-dashed border-primary/50 bg-primary/5 p-4 space-y-4">
@@ -622,21 +759,25 @@ export function SourceManager() {
           )}
 
           {/* Empty state */}
-          {layers.length === 0 && !showAddLayer && (
+          {layers.length === 0 && !showAddLayer && !uploadFile && (
             <div className="rounded-lg border border-dashed p-8 text-center">
               <Layers className="h-10 w-10 mx-auto mb-3 text-muted-foreground" />
               <p className="text-muted-foreground">No layers configured</p>
               <p className="text-sm text-muted-foreground mt-1 mb-4">
-                {readySources.length === 0
-                  ? "Add a source first, then create layers from it"
-                  : "Create a layer to start chunking map tiles"}
+                Upload a PMTiles file or create a chunked layer from a source
               </p>
-              {readySources.length > 0 && (
-                <Button onClick={startAddingLayer}>
-                  <Plus className="h-4 w-4 mr-2" />
-                  Create Your First Layer
+              <div className="flex gap-2 justify-center">
+                <Button variant="outline" onClick={() => fileInputRef.current?.click()}>
+                  <Upload className="h-4 w-4 mr-2" />
+                  Upload PMTiles
                 </Button>
-              )}
+                {readySources.length > 0 && (
+                  <Button onClick={startAddingLayer}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Create Chunked Layer
+                  </Button>
+                )}
+              </div>
             </div>
           )}
 
@@ -665,11 +806,13 @@ export function SourceManager() {
                           </span>
                         </div>
                         <div className="text-xs text-muted-foreground mt-0.5">
-                          z{layer.minZoom}-{layer.maxZoom} · precision {layer.precision}{layer.maxChunkSize ? ` (adaptive, max ${formatBytes(layer.maxChunkSize)})` : ` (${precisionInfo[layer.precision]?.split(" ")[0]} chunks)`} · source: {layer.sourceId}
+                          {layer.file
+                            ? `file · ${layer.tileType?.toUpperCase() || "unknown"} · z${layer.minZoom}-${layer.maxZoom} · ${formatBytes(layer.fileSize || 0)}`
+                            : `z${layer.minZoom}-${layer.maxZoom} · precision ${layer.precision}${layer.maxChunkSize ? ` (adaptive, max ${formatBytes(layer.maxChunkSize)})` : ` (${precisionInfo[layer.precision]?.split(" ")[0]} chunks)`} · source: ${layer.sourceId}`}
                         </div>
                       </div>
                       <div className="flex gap-1" onClick={e => e.stopPropagation()}>
-                        {(layer.status === "pending" || startingLayers.has(layer.id)) && (
+                        {!layer.file && (layer.status === "pending" || startingLayers.has(layer.id)) && (
                           <Button size="sm" onClick={() => handleStartChunking(layer.id)} disabled={startingLayers.has(layer.id)}>
                             {startingLayers.has(layer.id)
                               ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
@@ -677,7 +820,7 @@ export function SourceManager() {
                             {startingLayers.has(layer.id) ? "Starting..." : "Start Chunking"}
                           </Button>
                         )}
-                        {(layer.status === "ready" || layer.status === "error") && (
+                        {!layer.file && (layer.status === "ready" || layer.status === "error") && (
                           <Button size="sm" variant="outline" onClick={() => handleRetryErrors(layer.id)} disabled={startingLayers.has(layer.id)}>
                             {startingLayers.has(layer.id)
                               ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
@@ -729,33 +872,65 @@ export function SourceManager() {
                       {layer.error && <div className="text-sm text-destructive">{layer.error}</div>}
 
                       {/* Layer info */}
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-                        <div>
-                          <span className="text-muted-foreground">Source</span>
-                          <div className="font-mono mt-0.5">{layer.sourceId}</div>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">Zoom Range</span>
-                          <div className="mt-0.5">z{layer.minZoom} - z{layer.maxZoom}</div>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">Subdivision</span>
-                          <div className="mt-0.5">
-                            {layer.maxChunkSize
-                              ? `Adaptive (max ${formatBytes(layer.maxChunkSize)}, depth ${layer.maxPrecision || 2})`
-                              : `Fixed precision ${layer.precision}`}
-                          </div>
-                        </div>
-                        {layer.chunks && (
+                      {layer.file ? (
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                           <div>
-                            <span className="text-muted-foreground">Total Size</span>
-                            <div className="mt-0.5">{formatBytes(Object.values(layer.chunks).reduce((sum, c) => sum + (c.size || 0), 0))}</div>
+                            <span className="text-muted-foreground">Type</span>
+                            <div className="font-medium mt-0.5">File (uploaded)</div>
                           </div>
-                        )}
-                      </div>
+                          <div>
+                            <span className="text-muted-foreground">Tile Type</span>
+                            <div className="font-medium mt-0.5">{layer.tileType?.toUpperCase() || "Unknown"}</div>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Zoom Range</span>
+                            <div className="mt-0.5">z{layer.minZoom} - z{layer.maxZoom}</div>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">File Size</span>
+                            <div className="mt-0.5">{formatBytes(layer.fileSize || 0)}</div>
+                          </div>
+                          <div className="col-span-full">
+                            <span className="text-muted-foreground">Blossom URL: </span>
+                            <a
+                              href={`${serverConfig?.baseURL || ""}/${layer.file}.pmtiles`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-mono hover:underline"
+                            >
+                              {`${serverConfig?.baseURL || ""}/${layer.file.slice(0, 16)}...pmtiles`}
+                            </a>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                          <div>
+                            <span className="text-muted-foreground">Source</span>
+                            <div className="font-mono mt-0.5">{layer.sourceId}</div>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Zoom Range</span>
+                            <div className="mt-0.5">z{layer.minZoom} - z{layer.maxZoom}</div>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Subdivision</span>
+                            <div className="mt-0.5">
+                              {layer.maxChunkSize
+                                ? `Adaptive (max ${formatBytes(layer.maxChunkSize)}, depth ${layer.maxPrecision || 2})`
+                                : `Fixed precision ${layer.precision}`}
+                            </div>
+                          </div>
+                          {layer.chunks && (
+                            <div>
+                              <span className="text-muted-foreground">Total Size</span>
+                              <div className="mt-0.5">{formatBytes(Object.values(layer.chunks).reduce((sum, c) => sum + (c.size || 0), 0))}</div>
+                            </div>
+                          )}
+                        </div>
+                      )}
 
-                      {/* Persisted chunks table — always shown when chunks exist or actively chunking */}
-                      {(() => {
+                      {/* Persisted chunks table — only for chunked layers */}
+                      {!layer.file && (() => {
                         // During chunking, merge persisted chunks with live job data
                         type ChunkEntry = { geohash: string; file: string; size: number; status: "done" | "error" | "extracting"; isParent?: boolean; isActive?: boolean; percent?: number; bytesInfo?: string };
                         const leafEntries: ChunkEntry[] = [];
@@ -940,7 +1115,7 @@ export function SourceManager() {
                         );
                       })()}
 
-                      {source && (
+                      {!layer.file && source && (
                         <div className="text-xs text-muted-foreground bg-muted/50 rounded p-2">
                           Source: {source.tileType?.toUpperCase()} · {source.tileCompression} · z{source.minZoom}-{source.maxZoom}
                         </div>

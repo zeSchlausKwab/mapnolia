@@ -73,8 +73,8 @@ func main() {
 	server := &http.Server{
 		Addr:         config.Address(),
 		Handler:      router,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      10 * time.Minute,
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -861,35 +861,6 @@ func handleAddLayer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ID is required", http.StatusBadRequest)
 		return
 	}
-	if layer.SourceID == "" {
-		http.Error(w, "sourceId is required", http.StatusBadRequest)
-		return
-	}
-
-	// Verify source exists
-	sourceExists := false
-	for _, s := range config.Sources {
-		if s.ID == layer.SourceID {
-			sourceExists = true
-			break
-		}
-	}
-	if !sourceExists {
-		http.Error(w, "Source not found", http.StatusBadRequest)
-		return
-	}
-
-	// Set defaults
-	if layer.MaxZoom == 0 {
-		layer.MaxZoom = 14
-	}
-	if layer.Precision == 0 {
-		layer.Precision = 1
-	}
-	layer.Status = "pending"
-	if layer.MaxPrecision <= 0 {
-		layer.MaxPrecision = 2
-	}
 
 	// Check for duplicate ID
 	for _, l := range config.MapLayers {
@@ -899,13 +870,89 @@ func handleAddLayer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if layer.File != "" {
+		// File layer — verify blob exists in store and extract metadata
+		hash, err := blossom.ParseHash(layer.File)
+		if err != nil {
+			http.Error(w, "Invalid file hash", http.StatusBadRequest)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		meta, err := store.Info(ctx, hash)
+		if err != nil {
+			http.Error(w, "Blob not found — upload the file first via PUT /upload", http.StatusNotFound)
+			return
+		}
+		layer.FileSize = meta.Size
+		layer.Status = "ready"
+
+		// Extract PMTiles metadata if chunker is available
+		if chunker != nil {
+			blobPath := store.BlobPath(hash)
+			header, err := chunker.FetchPMTilesMetadata(blobPath)
+			if err != nil {
+				slog.Warn("failed to extract PMTiles metadata", "error", err)
+			} else {
+				layer.TileType = header.TileType
+				layer.MinZoom = header.MinZoom
+				layer.MaxZoom = header.MaxZoom
+			}
+		}
+
+		slog.Info("🗺️ file layer added", "id", layer.ID, "hash", layer.File, "size", meta.Size)
+	} else {
+		// Chunked layer — requires a source
+		if layer.SourceID == "" {
+			http.Error(w, "sourceId is required for chunked layers", http.StatusBadRequest)
+			return
+		}
+
+		// Verify source exists
+		sourceExists := false
+		for _, s := range config.Sources {
+			if s.ID == layer.SourceID {
+				sourceExists = true
+				break
+			}
+		}
+		if !sourceExists {
+			http.Error(w, "Source not found", http.StatusBadRequest)
+			return
+		}
+
+		// Set defaults
+		if layer.MaxZoom == 0 {
+			layer.MaxZoom = 14
+		}
+		if layer.Precision == 0 {
+			layer.Precision = 1
+		}
+		layer.Status = "pending"
+		if layer.MaxPrecision <= 0 {
+			layer.MaxPrecision = 2
+		}
+
+		slog.Info("🗺️ layer added", "id", layer.ID, "sourceId", layer.SourceID)
+	}
+
 	config.MapLayers = append(config.MapLayers, layer)
 	if err := config.Save(""); err != nil {
 		http.Error(w, "Failed to save config", http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("🗺️ layer added", "id", layer.ID, "sourceId", layer.SourceID)
+	// Republish announcement for file layers
+	if layer.File != "" {
+		go func() {
+			pubCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := PublishAnnouncement(pubCtx); err != nil {
+				slog.Error("failed to publish after file layer add", "error", err)
+			}
+		}()
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(layer)
@@ -925,6 +972,19 @@ func handleDeleteLayer(w http.ResponseWriter, r *http.Request, id string) {
 	if deletedLayer == nil {
 		http.Error(w, "Layer not found", http.StatusNotFound)
 		return
+	}
+
+	// Delete associated blobs from store
+	if deletedLayer.File != "" {
+		// File layer — delete the uploaded blob
+		hash, err := blossom.ParseHash(deletedLayer.File)
+		if err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := store.Delete(ctx, hash, "blosmap"); err != nil {
+				slog.Error("failed to delete file layer blob", "hash", deletedLayer.File, "error", err)
+			}
+		}
 	}
 
 	// Delete chunk files from store and remove from announcement

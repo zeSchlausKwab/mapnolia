@@ -27,7 +27,8 @@
       "Bash(pmtiles show:*)",
       "Bash(gh search code:*)",
       "Bash(gh api:*)",
-      "Bash(bun run build:all:*)"
+      "Bash(bun run build:all:*)",
+      "Bash(grep:*)"
     ]
   }
 }

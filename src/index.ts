@@ -24,6 +24,21 @@ const server = serve({
       });
     },
 
+    // Proxy Blossom endpoints to Go backend
+    "/upload": async (req) => {
+      const response = await fetch(`${BACKEND_URL}/upload`, {
+        method: req.method,
+        headers: req.headers,
+        body: req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined,
+      });
+
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    },
+
     // Serve index.html for all other routes
     "/*": index,
   },

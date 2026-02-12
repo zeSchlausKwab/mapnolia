@@ -139,7 +139,7 @@ export interface Source {
   vectorLayers?: string[];
 }
 
-// MapLayer represents an output chunked layer configuration
+// MapLayer represents an output layer configuration (chunked or file-based)
 export interface MapLayer {
   id: string;
   sourceId: string;
@@ -152,6 +152,9 @@ export interface MapLayer {
   status: "pending" | "chunking" | "ready" | "error";
   error?: string;
   chunks?: Chunks;
+  file?: string;      // blob hash for file layers (uploaded via blossom)
+  tileType?: string;  // from PMTiles header: mvt, png, jpg, etc.
+  fileSize?: number;  // file size in bytes
 }
 
 export interface ChunkResult {
@@ -294,6 +297,58 @@ export async function retryLayerErrors(layerId: string): Promise<void> {
     method: "POST",
   });
   if (!res.ok) throw new Error("Failed to retry errors");
+}
+
+// ============================================================================
+// Blossom Upload + File Layer
+// ============================================================================
+
+export interface BlobDescriptor {
+  url: string;
+  sha256: string;
+  size: number;
+  type: string;
+  uploaded: number;
+}
+
+/** Upload a file via Blossom PUT /upload, returns the blob descriptor */
+export function blossomUpload(
+  file: File,
+  onProgress?: (percent: number) => void
+): Promise<BlobDescriptor> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", "/upload");
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress((e.loaded / e.total) * 100);
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(JSON.parse(xhr.responseText));
+      } else {
+        reject(new Error(xhr.responseText || "Upload failed"));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Upload failed"));
+    xhr.send(file);
+  });
+}
+
+/** Register an uploaded blob as a file layer */
+export async function addFileLayer(hash: string, id: string, title: string): Promise<MapLayer> {
+  const res = await fetch(`${API_BASE}/layers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, title, file: hash }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "Failed to add file layer");
+  }
+  return res.json();
 }
 
 // ============================================================================

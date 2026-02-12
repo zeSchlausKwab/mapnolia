@@ -48,26 +48,33 @@ func PublishAnnouncement(ctx context.Context) error {
 		return fmt.Errorf("failed to derive pubkey: %w", err)
 	}
 
-	// Load current chunks
-	chunks, err := loadAnnouncement()
-	if err != nil {
-		return fmt.Errorf("failed to load chunks: %w", err)
+	// Build layers from config
+	var layers []Layer
+	for _, ml := range config.MapLayers {
+		if ml.Status != "ready" {
+			continue
+		}
+		layer := Layer{
+			ID:             ml.ID,
+			Title:          ml.Title,
+			BlossomServer:  config.BaseURL,
+			DefaultEnabled: true,
+			DefaultOpacity: 1.0,
+		}
+		if ml.File != "" {
+			// File layer — serve whole PMTiles file via blossom
+			layer.File = ml.File + ".pmtiles"
+			layer.Kind = "file"
+			layer.PMTilesType = ml.TileType
+		} else {
+			// Chunked layer
+			layer.Kind = "chunked-vector"
+			layer.Announcement = ml.Chunks
+		}
+		layers = append(layers, layer)
 	}
 
-	// Build announcement content
-	announcement := LayerAnnouncement{
-		Layers: []Layer{
-			{
-				ID:             "basemap",
-				Title:          "OpenStreetMap Basemap",
-				Kind:           "chunked-vector",
-				BlossomServer:  config.BaseURL,
-				Announcement:   chunks,
-				DefaultEnabled: true,
-				DefaultOpacity: 1.0,
-			},
-		},
-	}
+	announcement := LayerAnnouncement{Layers: layers}
 
 	contentJSON, err := json.Marshal(announcement)
 	if err != nil {

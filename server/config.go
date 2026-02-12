@@ -77,6 +77,9 @@ type MapLayer struct {
 	Status       string               `json:"status"`                // pending, chunking, ready, error
 	Error        string               `json:"error,omitempty"`
 	Chunks       map[string]ChunkInfo `json:"chunks,omitempty"`      // geohash -> chunk info
+	File         string               `json:"file,omitempty"`        // blob hash for file layers
+	TileType     string               `json:"tileType,omitempty"`    // from PMTiles header: mvt, png, jpg, etc.
+	FileSize     int64                `json:"fileSize,omitempty"`    // file size in bytes
 }
 
 // Address returns the listen address
