@@ -108,7 +108,7 @@ const formatFileSize = (bytes: number): string => {
 console.log("\n🚀 Starting build process...\n");
 
 const cliConfig = parseArgs();
-const outdir = cliConfig.outdir || path.join(process.cwd(), "dist");
+const outdir = cliConfig.outdir || path.join(process.cwd(), "server", "dashboard");
 
 if (existsSync(outdir)) {
   console.log(`🗑️ Cleaning previous build at ${outdir}`);
@@ -145,5 +145,8 @@ const outputTable = result.outputs.map(output => ({
 
 console.table(outputTable);
 const buildTime = (end - start).toFixed(2);
+
+// Preserve .gitkeep for go:embed (build cleans the directory)
+await Bun.write(path.join(outdir, ".gitkeep"), "");
 
 console.log(`\n✅ Build completed in ${buildTime}ms\n`);

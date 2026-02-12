@@ -90,6 +90,18 @@ func main() {
 		}
 	}()
 
+	// Publish announcement on startup if we have a key and chunks
+	if config.PrivateKey != "" {
+		go func() {
+			if _, err := loadAnnouncement(); err != nil {
+				return // no chunks yet, nothing to announce
+			}
+			if err := PublishAnnouncement(ctx); err != nil {
+				slog.Warn("failed to publish announcement on startup", "error", err)
+			}
+		}()
+	}
+
 	<-ctx.Done()
 	slog.Info("shutting down server...")
 
@@ -124,6 +136,16 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Route /api/* to our handlers
 	if strings.HasPrefix(req.URL.Path, "/api/") {
 		r.handleAPI(w, req)
+		return
+	}
+
+	// Route /dashboard to embedded frontend
+	if req.URL.Path == "/dashboard" {
+		http.Redirect(w, req, "/dashboard/", http.StatusMovedPermanently)
+		return
+	}
+	if strings.HasPrefix(req.URL.Path, "/dashboard/") {
+		r.handleDashboard(w, req)
 		return
 	}
 

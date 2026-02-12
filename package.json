@@ -10,7 +10,8 @@
     "dev:relay": "nak serve",
     "start": "NODE_ENV=production bun src/index.ts",
     "build": "bun run build.ts",
-    "build:backend": "cd server && go build -o ../bin/blosmap-server ."
+    "build:backend": "cd server && go build -o ../bin/blosmap-server .",
+    "build:all": "bun run build && bun run build:backend"
   },
   "dependencies": {
     "@nostr-dev-kit/ndk": "^2.18.1",
