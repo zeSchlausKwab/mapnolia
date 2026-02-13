@@ -48,33 +48,7 @@ func PublishAnnouncement(ctx context.Context) error {
 		return fmt.Errorf("failed to derive pubkey: %w", err)
 	}
 
-	// Build layers from config
-	var layers []Layer
-	for _, ml := range config.MapLayers {
-		if ml.Status != "ready" {
-			continue
-		}
-		layer := Layer{
-			ID:             ml.ID,
-			Title:          ml.Title,
-			BlossomServer:  config.BaseURL,
-			DefaultEnabled: true,
-			DefaultOpacity: 1.0,
-		}
-		if ml.File != "" {
-			// File layer — serve whole PMTiles file via blossom
-			layer.File = ml.File + ".pmtiles"
-			layer.Kind = "file"
-			layer.PMTilesType = ml.TileType
-		} else {
-			// Chunked layer
-			layer.Kind = "chunked-vector"
-			layer.Announcement = ml.Chunks
-		}
-		layers = append(layers, layer)
-	}
-
-	announcement := LayerAnnouncement{Layers: layers}
+	announcement := buildLayerAnnouncement()
 
 	contentJSON, err := json.Marshal(announcement)
 	if err != nil {

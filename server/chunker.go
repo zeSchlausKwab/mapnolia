@@ -250,14 +250,14 @@ func (c *Chunker) StartChunking(ctx context.Context, layer *MapLayer, source *So
 	c.jobs[layer.ID] = job
 	c.mu.Unlock()
 
-	// Update layer status in config immediately so frontend sees "chunking"
-	for i := range config.MapLayers {
-		if config.MapLayers[i].ID == layer.ID {
-			config.MapLayers[i].Status = "chunking"
+	// Update layer status immediately so frontend sees "chunking"
+	for i := range layers {
+		if layers[i].ID == layer.ID {
+			layers[i].Status = "chunking"
 			break
 		}
 	}
-	config.Save("")
+	SaveLayers(config.DataDir)
 
 	go c.runChunking(ctx, layer, source, job)
 	return nil
@@ -265,15 +265,15 @@ func (c *Chunker) StartChunking(ctx context.Context, layer *MapLayer, source *So
 
 func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Source, job *ChunkJob) {
 	defer func() {
-		// Update layer status in config
-		for i := range config.MapLayers {
-			if config.MapLayers[i].ID == layer.ID {
-				config.MapLayers[i].Status = job.Status
-				config.MapLayers[i].Error = job.Error
+		// Update layer status
+		for i := range layers {
+			if layers[i].ID == layer.ID {
+				layers[i].Status = job.Status
+				layers[i].Error = job.Error
 				break
 			}
 		}
-		config.Save("")
+		SaveLayers(config.DataDir)
 	}()
 
 	// Resolve input — for remote URLs, use directly (pmtiles extract supports HTTP Range requests)
@@ -311,8 +311,6 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 		"minZoom", layer.MinZoom,
 		"maxZoom", layer.MaxZoom,
 	)
-
-	announcement, _ := loadAnnouncement()
 
 	for _, gh := range geohashes {
 		select {
@@ -369,26 +367,22 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 			// Replace parent with 32 children in the count
 			job.TotalChunks += 31
 
-			c.processSubdivision(ctx, gh, outputPath, layer, job, announcement, maxPrecision)
+			c.processSubdivision(ctx, gh, outputPath, layer, job, maxPrecision)
 
 			// Clean up parent temp file (not registered with blisk)
 			os.Remove(outputPath)
 		} else {
 			// Leaf chunk: register with blisk store
-			c.registerLeafChunk(ctx, gh, outputPath, bbox, layer, job, announcement)
+			c.registerLeafChunk(ctx, gh, outputPath, bbox, layer, job)
 		}
 
-		// Save config and announcement after each top-level geohash completes
-		config.Save("")
-		if err := saveAnnouncement(announcement); err != nil {
-			slog.Error("failed to save announcement", "error", err)
-		} else {
-			go func() {
-				pubCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				PublishAnnouncement(pubCtx)
-			}()
-		}
+		// Save layers after each top-level geohash completes
+		SaveLayers(config.DataDir)
+		go func() {
+			pubCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			PublishAnnouncement(pubCtx)
+		}()
 	}
 
 	job.Status = "ready"
@@ -410,14 +404,14 @@ func (c *Chunker) StartRetry(ctx context.Context, layer *MapLayer, source *Sourc
 	c.jobs[layer.ID] = job
 	c.mu.Unlock()
 
-	// Update layer status in config immediately so frontend sees "chunking"
-	for i := range config.MapLayers {
-		if config.MapLayers[i].ID == layer.ID {
-			config.MapLayers[i].Status = "chunking"
+	// Update layer status immediately so frontend sees "chunking"
+	for i := range layers {
+		if layers[i].ID == layer.ID {
+			layers[i].Status = "chunking"
 			break
 		}
 	}
-	config.Save("")
+	SaveLayers(config.DataDir)
 
 	go c.runRetry(ctx, layer, source, job, geohashes)
 	return nil
@@ -425,14 +419,14 @@ func (c *Chunker) StartRetry(ctx context.Context, layer *MapLayer, source *Sourc
 
 func (c *Chunker) runRetry(ctx context.Context, layer *MapLayer, source *Source, job *ChunkJob, geohashes []string) {
 	defer func() {
-		for i := range config.MapLayers {
-			if config.MapLayers[i].ID == layer.ID {
-				config.MapLayers[i].Status = job.Status
-				config.MapLayers[i].Error = job.Error
+		for i := range layers {
+			if layers[i].ID == layer.ID {
+				layers[i].Status = job.Status
+				layers[i].Error = job.Error
 				break
 			}
 		}
-		config.Save("")
+		SaveLayers(config.DataDir)
 	}()
 
 	// Resolve input
@@ -463,8 +457,6 @@ func (c *Chunker) runRetry(ctx context.Context, layer *MapLayer, source *Source,
 		"chunks", len(geohashes),
 	)
 
-	announcement, _ := loadAnnouncement()
-
 	for _, gh := range geohashes {
 		select {
 		case <-ctx.Done():
@@ -475,7 +467,7 @@ func (c *Chunker) runRetry(ctx context.Context, layer *MapLayer, source *Source,
 		}
 
 		// Clean up old entry and any children before re-extracting
-		cleanupChunkAndChildren(gh, layer.ID, announcement)
+		cleanupChunkAndChildren(gh, layer.ID)
 
 		bbox := geohashToBBox(gh)
 		ghLabel := gh
@@ -521,23 +513,19 @@ func (c *Chunker) runRetry(ctx context.Context, layer *MapLayer, source *Source,
 			job.Subdivisions++
 			job.TotalChunks += 31
 
-			c.processSubdivision(ctx, gh, outputPath, layer, job, announcement, maxPrecision)
+			c.processSubdivision(ctx, gh, outputPath, layer, job, maxPrecision)
 
 			os.Remove(outputPath)
 		} else {
-			c.registerLeafChunk(ctx, gh, outputPath, bbox, layer, job, announcement)
+			c.registerLeafChunk(ctx, gh, outputPath, bbox, layer, job)
 		}
 
-		config.Save("")
-		if err := saveAnnouncement(announcement); err != nil {
-			slog.Error("failed to save announcement", "error", err)
-		} else {
-			go func() {
-				pubCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				PublishAnnouncement(pubCtx)
-			}()
-		}
+		SaveLayers(config.DataDir)
+		go func() {
+			pubCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			PublishAnnouncement(pubCtx)
+		}()
 	}
 
 	job.Status = "ready"
@@ -545,12 +533,12 @@ func (c *Chunker) runRetry(ctx context.Context, layer *MapLayer, source *Source,
 }
 
 // cleanupChunkAndChildren removes a chunk and all its descendants from the layer config, store, and announcement
-func cleanupChunkAndChildren(gh string, layerID string, announcement map[string]ChunkInfo) {
-	for idx := range config.MapLayers {
-		if config.MapLayers[idx].ID != layerID {
+func cleanupChunkAndChildren(gh string, layerID string) {
+	for idx := range layers {
+		if layers[idx].ID != layerID {
 			continue
 		}
-		chunks := config.MapLayers[idx].Chunks
+		chunks := layers[idx].Chunks
 		if chunks == nil {
 			return
 		}
@@ -559,7 +547,6 @@ func cleanupChunkAndChildren(gh string, layerID string, announcement map[string]
 		if info, exists := chunks[gh]; exists {
 			deleteChunkFromStore(info.File)
 			delete(chunks, gh)
-			delete(announcement, gh)
 		}
 
 		// Delete all descendants (any geohash that starts with gh)
@@ -568,7 +555,6 @@ func cleanupChunkAndChildren(gh string, layerID string, announcement map[string]
 				if strings.HasPrefix(childGH, gh) && childGH != gh {
 					deleteChunkFromStore(childInfo.File)
 					delete(chunks, childGH)
-					delete(announcement, childGH)
 				}
 			}
 		}
@@ -641,7 +627,6 @@ func (c *Chunker) processSubdivision(
 	parentPath string,
 	layer *MapLayer,
 	job *ChunkJob,
-	announcement map[string]ChunkInfo,
 	maxPrecision int,
 ) {
 	slog.Info("subdividing chunk", "parent", parentGH, "children", 32)
@@ -695,13 +680,13 @@ func (c *Chunker) processSubdivision(
 			job.Subdivisions++
 			job.TotalChunks += 31
 
-			c.processSubdivision(ctx, childGH, childPath, layer, job, announcement, maxPrecision)
+			c.processSubdivision(ctx, childGH, childPath, layer, job, maxPrecision)
 
 			// Clean up child temp file after its children are extracted
 			os.Remove(childPath)
 		} else {
 			// Leaf chunk: register with blisk store
-			c.registerLeafChunk(ctx, childGH, childPath, childBBox, layer, job, announcement)
+			c.registerLeafChunk(ctx, childGH, childPath, childBBox, layer, job)
 		}
 	}
 
@@ -717,7 +702,6 @@ func (c *Chunker) registerLeafChunk(
 	bbox [4]float64,
 	layer *MapLayer,
 	job *ChunkJob,
-	announcement map[string]ChunkInfo,
 ) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -752,16 +736,13 @@ func (c *Chunker) registerLeafChunk(
 		Size:    size,
 	}
 
-	// Update announcement
-	announcement[gh] = chunkInfo
-
-	// Persist chunk in layer config
-	for idx := range config.MapLayers {
-		if config.MapLayers[idx].ID == layer.ID {
-			if config.MapLayers[idx].Chunks == nil {
-				config.MapLayers[idx].Chunks = make(map[string]ChunkInfo)
+	// Persist chunk in layer
+	for idx := range layers {
+		if layers[idx].ID == layer.ID {
+			if layers[idx].Chunks == nil {
+				layers[idx].Chunks = make(map[string]ChunkInfo)
 			}
-			config.MapLayers[idx].Chunks[gh] = chunkInfo
+			layers[idx].Chunks[gh] = chunkInfo
 			break
 		}
 	}
@@ -924,6 +905,13 @@ func (c *Chunker) GetJob(sourceID string) *ChunkJob {
 	return c.jobs[sourceID]
 }
 
+// ClearJob removes a job entry so the layer ID can be reused
+func (c *Chunker) ClearJob(layerID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.jobs, layerID)
+}
+
 // ListDownloads returns all downloaded PMTiles files
 func (c *Chunker) ListDownloads() ([]DownloadedFile, error) {
 	var files []DownloadedFile
@@ -958,7 +946,7 @@ func (c *Chunker) ListDownloads() ([]DownloadedFile, error) {
 	}
 
 	// Check for local files referenced in sources
-	for _, src := range config.Sources {
+	for _, src := range sources {
 		if strings.HasPrefix(src.URL, "http") {
 			continue
 		}

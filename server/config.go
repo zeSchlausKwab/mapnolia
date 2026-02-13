@@ -31,11 +31,9 @@ type Config struct {
 	AdminPubkey string   `json:"adminPubkey,omitempty"` // hex pubkey of admin user
 	Relays      []string `json:"relays"`
 
-	// PMTiles sources (input files)
-	Sources []Source `json:"sources,omitempty"`
-
-	// Map layers (output configurations)
-	MapLayers []MapLayer `json:"layers,omitempty"`
+	// Legacy fields — used only for migration, then cleared
+	LegacySources []Source   `json:"sources,omitempty"`
+	LegacyLayers  []MapLayer `json:"layers,omitempty"`
 }
 
 // Source represents an input PMTiles file
@@ -68,20 +66,114 @@ type Source struct {
 // MapLayer represents an output chunked layer configuration
 type MapLayer struct {
 	ID           string               `json:"id"`
-	SourceID     string               `json:"sourceId"`              // references a Source
-	Title        string               `json:"title"`                 // display name
-	MinZoom      int                  `json:"minZoom"`               // minimum zoom level to extract
-	MaxZoom      int                  `json:"maxZoom"`               // maximum zoom level to extract
-	Precision    int                  `json:"precision"`             // starting geohash precision (1-4)
+	SourceID     string               `json:"sourceId"`               // references a Source
+	Title        string               `json:"title"`                  // display name
+	MinZoom      int                  `json:"minZoom"`                // minimum zoom level to extract
+	MaxZoom      int                  `json:"maxZoom"`                // maximum zoom level to extract
+	Precision    int                  `json:"precision"`              // starting geohash precision (1-4)
 	MaxChunkSize int64                `json:"maxChunkSize,omitempty"` // bytes; chunks exceeding this get subdivided (0 = disabled)
 	MaxPrecision int                  `json:"maxPrecision,omitempty"` // max depth for recursive subdivision (default 4)
-	Status       string               `json:"status"`                // pending, chunking, ready, error
+	Status       string               `json:"status"`                 // pending, chunking, ready, error
 	Error        string               `json:"error,omitempty"`
-	Chunks       map[string]ChunkInfo `json:"chunks,omitempty"`      // geohash -> chunk info
-	File         string               `json:"file,omitempty"`        // blob hash for file layers
-	TileType     string               `json:"tileType,omitempty"`    // from PMTiles header: mvt, png, jpg, etc.
-	FileSize     int64                `json:"fileSize,omitempty"`    // file size in bytes
+	Chunks       map[string]ChunkInfo `json:"chunks,omitempty"` // geohash -> chunk info
+	File         string               `json:"file,omitempty"`   // blob hash for file layers
+	TileType     string               `json:"tileType,omitempty"`
+	FileSize     int64                `json:"fileSize,omitempty"`
 }
+
+// ChunkInfo describes a single PMTiles chunk
+type ChunkInfo struct {
+	BBox    [4]float64 `json:"bbox"`
+	File    string     `json:"file"`
+	MaxZoom int        `json:"maxZoom"`
+	Size    int64      `json:"size,omitempty"`
+}
+
+// ============================================================================
+// Sources & Layers — stored in {dataDir}/, not in config
+// ============================================================================
+
+var (
+	sources []Source
+	layers  []MapLayer
+)
+
+func LoadSources(dataDir string) error {
+	path := filepath.Join(dataDir, "sources.json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		sources = []Source{}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read sources: %w", err)
+	}
+	return json.Unmarshal(data, &sources)
+}
+
+func SaveSources(dataDir string) error {
+	path := filepath.Join(dataDir, "sources.json")
+	data, err := json.MarshalIndent(sources, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func LoadLayers(dataDir string) error {
+	path := filepath.Join(dataDir, "layers.json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		layers = []MapLayer{}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read layers: %w", err)
+	}
+	return json.Unmarshal(data, &layers)
+}
+
+func SaveLayers(dataDir string) error {
+	path := filepath.Join(dataDir, "layers.json")
+	data, err := json.MarshalIndent(layers, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// MigrateFromConfig moves sources/layers from an old config into separate files
+func MigrateFromConfig(c *Config) {
+	if len(c.LegacySources) == 0 && len(c.LegacyLayers) == 0 {
+		return
+	}
+
+	if len(c.LegacySources) > 0 {
+		sources = c.LegacySources
+		c.LegacySources = nil
+	}
+	if len(c.LegacyLayers) > 0 {
+		layers = c.LegacyLayers
+		c.LegacyLayers = nil
+	}
+
+	if err := SaveSources(c.DataDir); err != nil {
+		slog.Error("failed to migrate sources", "error", err)
+	}
+	if err := SaveLayers(c.DataDir); err != nil {
+		slog.Error("failed to migrate layers", "error", err)
+	}
+	if err := c.Save(""); err != nil {
+		slog.Error("failed to save cleaned config", "error", err)
+	}
+
+	slog.Info("migrated sources and layers from config to data directory",
+		"sources", len(sources), "layers", len(layers))
+}
+
+// ============================================================================
+// Config
+// ============================================================================
 
 // Address returns the listen address
 func (c *Config) Address() string {

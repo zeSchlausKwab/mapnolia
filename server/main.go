@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -43,6 +42,17 @@ func main() {
 		os.Exit(1)
 	}
 	defer store.Close()
+
+	// Load sources and layers from data directory
+	if err := LoadSources(config.DataDir); err != nil {
+		slog.Error("failed to load sources", "error", err)
+	}
+	if err := LoadLayers(config.DataDir); err != nil {
+		slog.Error("failed to load layers", "error", err)
+	}
+
+	// Migrate legacy data from config file if present
+	MigrateFromConfig(config)
 
 	// Initialize chunker
 	if err := initChunker(); err != nil {
@@ -90,12 +100,9 @@ func main() {
 		}
 	}()
 
-	// Publish announcement on startup if we have a key and chunks
-	if config.PrivateKey != "" {
+	// Publish announcement on startup if we have a key and layers
+	if config.PrivateKey != "" && len(layers) > 0 {
 		go func() {
-			if _, err := loadAnnouncement(); err != nil {
-				return // no chunks yet, nothing to announce
-			}
 			if err := PublishAnnouncement(ctx); err != nil {
 				slog.Warn("failed to publish announcement on startup", "error", err)
 			}
@@ -357,24 +364,17 @@ func handleGetInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetChunks(w http.ResponseWriter, r *http.Request) {
-	announcement, err := loadAnnouncement()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
+	allChunks := aggregateChunks()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(announcement)
+	json.NewEncoder(w).Encode(allChunks)
 }
 
 func handleGetStats(w http.ResponseWriter, r *http.Request) {
-	announcement, _ := loadAnnouncement()
-	chunkCount := len(announcement)
+	allChunks := aggregateChunks()
+	chunkCount := len(allChunks)
 
-	// Get disk usage from blisk
-	// For now, estimate from chunks
 	var totalSize int64
-	for _, chunk := range announcement {
+	for _, chunk := range allChunks {
 		totalSize += chunk.Size
 	}
 
@@ -492,26 +492,7 @@ func handlePublishAnnouncement(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAnnouncementPreview(w http.ResponseWriter, r *http.Request) {
-	// Build the announcement event locally (same as PublishAnnouncement but don't sign/send)
-	chunks, err := loadAnnouncement()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	announcement := LayerAnnouncement{
-		Layers: []Layer{
-			{
-				ID:             "basemap",
-				Title:          "OpenStreetMap Basemap",
-				Kind:           "chunked-vector",
-				BlossomServer:  config.BaseURL,
-				Announcement:   chunks,
-				DefaultEnabled: true,
-				DefaultOpacity: 1.0,
-			},
-		},
-	}
+	announcement := buildLayerAnnouncement()
 
 	preview := map[string]interface{}{
 		"kind":    34444,
@@ -544,25 +525,24 @@ func handleAddChunk(w http.ResponseWriter, r *http.Request, geohash string) {
 func handleRemoveChunk(w http.ResponseWriter, r *http.Request, geohash string) {
 	slog.Info("🗑️ chunk removal requested", "geohash", geohash)
 
-	announcement, err := loadAnnouncement()
-	if err != nil {
-		http.Error(w, "Failed to load announcement", http.StatusInternalServerError)
+	// Find which layer contains this chunk
+	var found bool
+	for i := range layers {
+		if chunk, exists := layers[i].Chunks[geohash]; exists {
+			deleteChunkFromStore(chunk.File)
+			delete(layers[i].Chunks, geohash)
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		http.Error(w, "Chunk not found", http.StatusNotFound)
 		return
 	}
 
-	chunk, exists := announcement[geohash]
-	if !exists {
-		http.Error(w, "Chunk not found in announcement", http.StatusNotFound)
-		return
-	}
-
-	// Delete from blossom store
-	deleteChunkFromStore(chunk.File)
-
-	// Remove from announcement
-	delete(announcement, geohash)
-	if err := saveAnnouncement(announcement); err != nil {
-		http.Error(w, "Failed to save announcement", http.StatusInternalServerError)
+	if err := SaveLayers(config.DataDir); err != nil {
+		http.Error(w, "Failed to save layers", http.StatusInternalServerError)
 		return
 	}
 
@@ -575,7 +555,7 @@ func handleRemoveChunk(w http.ResponseWriter, r *http.Request, geohash string) {
 		}
 	}()
 
-	slog.Info("🗑️ chunk removed", "geohash", geohash, "file", chunk.File)
+	slog.Info("🗑️ chunk removed", "geohash", geohash)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -590,7 +570,7 @@ func handleRemoveChunk(w http.ResponseWriter, r *http.Request, geohash string) {
 
 func handleGetSources(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(config.Sources)
+	json.NewEncoder(w).Encode(sources)
 }
 
 func handleAddSource(w http.ResponseWriter, r *http.Request) {
@@ -613,16 +593,16 @@ func handleAddSource(w http.ResponseWriter, r *http.Request) {
 	source.Status = "fetching_metadata"
 
 	// Check for duplicate ID
-	for _, s := range config.Sources {
+	for _, s := range sources {
 		if s.ID == source.ID {
 			http.Error(w, "Source with this ID already exists", http.StatusConflict)
 			return
 		}
 	}
 
-	config.Sources = append(config.Sources, source)
-	if err := config.Save(""); err != nil {
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+	sources = append(sources, source)
+	if err := SaveSources(config.DataDir); err != nil {
+		http.Error(w, "Failed to save sources", http.StatusInternalServerError)
 		return
 	}
 
@@ -636,38 +616,36 @@ func handleAddSource(w http.ResponseWriter, r *http.Request) {
 		header, err := chunker.FetchPMTilesMetadata(source.URL)
 		if err != nil {
 			slog.Error("failed to fetch metadata", "source", source.ID, "error", err)
-			// Update source with error
-			for i := range config.Sources {
-				if config.Sources[i].ID == source.ID {
-					config.Sources[i].Status = "error"
-					config.Sources[i].Error = fmt.Sprintf("Failed to fetch metadata: %v", err)
+			for i := range sources {
+				if sources[i].ID == source.ID {
+					sources[i].Status = "error"
+					sources[i].Error = fmt.Sprintf("Failed to fetch metadata: %v", err)
 					break
 				}
 			}
 		} else {
-			// Update source with metadata
-			for i := range config.Sources {
-				if config.Sources[i].ID == source.ID {
-					config.Sources[i].TileType = header.TileType
-					config.Sources[i].TileCompression = header.TileCompression
-					config.Sources[i].MinZoom = header.MinZoom
-					config.Sources[i].MaxZoom = header.MaxZoom
-					config.Sources[i].Bounds = header.Bounds
-					config.Sources[i].Center = header.Center
-					config.Sources[i].NumTileEntries = header.NumTileEntries
-					config.Sources[i].NumContents = header.NumContents
-					config.Sources[i].Clustered = header.Clustered
-					config.Sources[i].InternalComp = header.InternalComp
-					config.Sources[i].Attribution = header.Attribution
-					config.Sources[i].Description = header.Description
-					config.Sources[i].VectorLayers = header.VectorLayers
-					config.Sources[i].Status = "ready"
+			for i := range sources {
+				if sources[i].ID == source.ID {
+					sources[i].TileType = header.TileType
+					sources[i].TileCompression = header.TileCompression
+					sources[i].MinZoom = header.MinZoom
+					sources[i].MaxZoom = header.MaxZoom
+					sources[i].Bounds = header.Bounds
+					sources[i].Center = header.Center
+					sources[i].NumTileEntries = header.NumTileEntries
+					sources[i].NumContents = header.NumContents
+					sources[i].Clustered = header.Clustered
+					sources[i].InternalComp = header.InternalComp
+					sources[i].Attribution = header.Attribution
+					sources[i].Description = header.Description
+					sources[i].VectorLayers = header.VectorLayers
+					sources[i].Status = "ready"
 					slog.Info("📊 metadata fetched", "source", source.ID, "minZoom", header.MinZoom, "maxZoom", header.MaxZoom, "type", header.TileType)
 					break
 				}
 			}
 		}
-		config.Save("")
+		SaveSources(config.DataDir)
 	}()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -682,9 +660,9 @@ func handleRefreshSourceMetadata(w http.ResponseWriter, r *http.Request, id stri
 
 	var source *Source
 	var sourceIdx int
-	for i := range config.Sources {
-		if config.Sources[i].ID == id {
-			source = &config.Sources[i]
+	for i := range sources {
+		if sources[i].ID == id {
+			source = &sources[i]
 			sourceIdx = i
 			break
 		}
@@ -695,41 +673,40 @@ func handleRefreshSourceMetadata(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	config.Sources[sourceIdx].Status = "fetching_metadata"
-	config.Save("")
+	sources[sourceIdx].Status = "fetching_metadata"
+	SaveSources(config.DataDir)
 
 	header, err := chunker.FetchPMTilesMetadata(source.URL)
 	if err != nil {
-		config.Sources[sourceIdx].Status = "error"
-		config.Sources[sourceIdx].Error = fmt.Sprintf("Failed to fetch metadata: %v", err)
-		config.Save("")
-		// Return the source with error status instead of HTTP 500
+		sources[sourceIdx].Status = "error"
+		sources[sourceIdx].Error = fmt.Sprintf("Failed to fetch metadata: %v", err)
+		SaveSources(config.DataDir)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(config.Sources[sourceIdx])
+		json.NewEncoder(w).Encode(sources[sourceIdx])
 		return
 	}
 
-	config.Sources[sourceIdx].TileType = header.TileType
-	config.Sources[sourceIdx].TileCompression = header.TileCompression
-	config.Sources[sourceIdx].MinZoom = header.MinZoom
-	config.Sources[sourceIdx].MaxZoom = header.MaxZoom
-	config.Sources[sourceIdx].Bounds = header.Bounds
-	config.Sources[sourceIdx].Center = header.Center
-	config.Sources[sourceIdx].NumTileEntries = header.NumTileEntries
-	config.Sources[sourceIdx].NumContents = header.NumContents
-	config.Sources[sourceIdx].Clustered = header.Clustered
-	config.Sources[sourceIdx].InternalComp = header.InternalComp
-	config.Sources[sourceIdx].Attribution = header.Attribution
-	config.Sources[sourceIdx].Description = header.Description
-	config.Sources[sourceIdx].VectorLayers = header.VectorLayers
-	config.Sources[sourceIdx].Status = "ready"
-	config.Sources[sourceIdx].Error = ""
-	config.Save("")
+	sources[sourceIdx].TileType = header.TileType
+	sources[sourceIdx].TileCompression = header.TileCompression
+	sources[sourceIdx].MinZoom = header.MinZoom
+	sources[sourceIdx].MaxZoom = header.MaxZoom
+	sources[sourceIdx].Bounds = header.Bounds
+	sources[sourceIdx].Center = header.Center
+	sources[sourceIdx].NumTileEntries = header.NumTileEntries
+	sources[sourceIdx].NumContents = header.NumContents
+	sources[sourceIdx].Clustered = header.Clustered
+	sources[sourceIdx].InternalComp = header.InternalComp
+	sources[sourceIdx].Attribution = header.Attribution
+	sources[sourceIdx].Description = header.Description
+	sources[sourceIdx].VectorLayers = header.VectorLayers
+	sources[sourceIdx].Status = "ready"
+	sources[sourceIdx].Error = ""
+	SaveSources(config.DataDir)
 
 	slog.Info("📊 metadata refreshed", "source", id, "minZoom", header.MinZoom, "maxZoom", header.MaxZoom)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(config.Sources[sourceIdx])
+	json.NewEncoder(w).Encode(sources[sourceIdx])
 }
 
 func handleUpdateSource(w http.ResponseWriter, r *http.Request, id string) {
@@ -740,8 +717,8 @@ func handleUpdateSource(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	var sourceIdx int = -1
-	for i := range config.Sources {
-		if config.Sources[i].ID == id {
+	for i := range sources {
+		if sources[i].ID == id {
 			sourceIdx = i
 			break
 		}
@@ -753,74 +730,74 @@ func handleUpdateSource(w http.ResponseWriter, r *http.Request, id string) {
 
 	urlChanged := false
 	if url, ok := updates["url"].(string); ok && url != "" {
-		if url != config.Sources[sourceIdx].URL {
-			config.Sources[sourceIdx].URL = url
+		if url != sources[sourceIdx].URL {
+			sources[sourceIdx].URL = url
 			urlChanged = true
 		}
 	}
 	if title, ok := updates["title"].(string); ok {
-		config.Sources[sourceIdx].Title = title
+		sources[sourceIdx].Title = title
 	}
 
-	if err := config.Save(""); err != nil {
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+	if err := SaveSources(config.DataDir); err != nil {
+		http.Error(w, "Failed to save sources", http.StatusInternalServerError)
 		return
 	}
 
 	// If URL changed, re-fetch metadata in background
 	if urlChanged && chunker != nil {
-		config.Sources[sourceIdx].Status = "fetching_metadata"
-		config.Sources[sourceIdx].Error = ""
-		config.Save("")
+		sources[sourceIdx].Status = "fetching_metadata"
+		sources[sourceIdx].Error = ""
+		SaveSources(config.DataDir)
 
 		go func() {
-			header, err := chunker.FetchPMTilesMetadata(config.Sources[sourceIdx].URL)
+			header, err := chunker.FetchPMTilesMetadata(sources[sourceIdx].URL)
 			if err != nil {
 				slog.Error("failed to fetch metadata after URL update", "source", id, "error", err)
-				for i := range config.Sources {
-					if config.Sources[i].ID == id {
-						config.Sources[i].Status = "error"
-						config.Sources[i].Error = fmt.Sprintf("Failed to fetch metadata: %v", err)
+				for i := range sources {
+					if sources[i].ID == id {
+						sources[i].Status = "error"
+						sources[i].Error = fmt.Sprintf("Failed to fetch metadata: %v", err)
 						break
 					}
 				}
 			} else {
-				for i := range config.Sources {
-					if config.Sources[i].ID == id {
-						config.Sources[i].TileType = header.TileType
-						config.Sources[i].TileCompression = header.TileCompression
-						config.Sources[i].MinZoom = header.MinZoom
-						config.Sources[i].MaxZoom = header.MaxZoom
-						config.Sources[i].Bounds = header.Bounds
-						config.Sources[i].Center = header.Center
-						config.Sources[i].NumTileEntries = header.NumTileEntries
-						config.Sources[i].NumContents = header.NumContents
-						config.Sources[i].Clustered = header.Clustered
-						config.Sources[i].InternalComp = header.InternalComp
-						config.Sources[i].Attribution = header.Attribution
-						config.Sources[i].Description = header.Description
-						config.Sources[i].VectorLayers = header.VectorLayers
-						config.Sources[i].Status = "ready"
-						config.Sources[i].Error = ""
+				for i := range sources {
+					if sources[i].ID == id {
+						sources[i].TileType = header.TileType
+						sources[i].TileCompression = header.TileCompression
+						sources[i].MinZoom = header.MinZoom
+						sources[i].MaxZoom = header.MaxZoom
+						sources[i].Bounds = header.Bounds
+						sources[i].Center = header.Center
+						sources[i].NumTileEntries = header.NumTileEntries
+						sources[i].NumContents = header.NumContents
+						sources[i].Clustered = header.Clustered
+						sources[i].InternalComp = header.InternalComp
+						sources[i].Attribution = header.Attribution
+						sources[i].Description = header.Description
+						sources[i].VectorLayers = header.VectorLayers
+						sources[i].Status = "ready"
+						sources[i].Error = ""
 						slog.Info("metadata refreshed after URL update", "source", id)
 						break
 					}
 				}
 			}
-			config.Save("")
+			SaveSources(config.DataDir)
 		}()
 	}
 
 	slog.Info("source updated", "id", id, "urlChanged", urlChanged)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(config.Sources[sourceIdx])
+	json.NewEncoder(w).Encode(sources[sourceIdx])
 }
 
 func handleDeleteSource(w http.ResponseWriter, r *http.Request, id string) {
 	found := false
 	var newSources []Source
-	for _, s := range config.Sources {
+	for _, s := range sources {
 		if s.ID == id {
 			found = true
 			continue
@@ -833,9 +810,9 @@ func handleDeleteSource(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	config.Sources = newSources
-	if err := config.Save(""); err != nil {
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+	sources = newSources
+	if err := SaveSources(config.DataDir); err != nil {
+		http.Error(w, "Failed to save sources", http.StatusInternalServerError)
 		return
 	}
 
@@ -851,7 +828,7 @@ func handleDeleteSource(w http.ResponseWriter, r *http.Request, id string) {
 
 func handleGetLayers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(config.MapLayers)
+	json.NewEncoder(w).Encode(layers)
 }
 
 func handleAddLayer(w http.ResponseWriter, r *http.Request) {
@@ -868,7 +845,7 @@ func handleAddLayer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check for duplicate ID
-	for _, l := range config.MapLayers {
+	for _, l := range layers {
 		if l.ID == layer.ID {
 			http.Error(w, "Layer with this ID already exists", http.StatusConflict)
 			return
@@ -916,7 +893,7 @@ func handleAddLayer(w http.ResponseWriter, r *http.Request) {
 
 		// Verify source exists
 		sourceExists := false
-		for _, s := range config.Sources {
+		for _, s := range sources {
 			if s.ID == layer.SourceID {
 				sourceExists = true
 				break
@@ -942,9 +919,9 @@ func handleAddLayer(w http.ResponseWriter, r *http.Request) {
 		slog.Info("🗺️ layer added", "id", layer.ID, "sourceId", layer.SourceID)
 	}
 
-	config.MapLayers = append(config.MapLayers, layer)
-	if err := config.Save(""); err != nil {
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+	layers = append(layers, layer)
+	if err := SaveLayers(config.DataDir); err != nil {
+		http.Error(w, "Failed to save layers", http.StatusInternalServerError)
 		return
 	}
 
@@ -966,12 +943,12 @@ func handleAddLayer(w http.ResponseWriter, r *http.Request) {
 func handleDeleteLayer(w http.ResponseWriter, r *http.Request, id string) {
 	var deletedLayer *MapLayer
 	var newLayers []MapLayer
-	for i := range config.MapLayers {
-		if config.MapLayers[i].ID == id {
-			deletedLayer = &config.MapLayers[i]
+	for i := range layers {
+		if layers[i].ID == id {
+			deletedLayer = &layers[i]
 			continue
 		}
-		newLayers = append(newLayers, config.MapLayers[i])
+		newLayers = append(newLayers, layers[i])
 	}
 
 	if deletedLayer == nil {
@@ -992,19 +969,19 @@ func handleDeleteLayer(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 
-	// Delete chunk files from store and remove from announcement
-	announcement, _ := loadAnnouncement()
-	for gh, chunk := range deletedLayer.Chunks {
+	// Delete chunk files from store
+	for _, chunk := range deletedLayer.Chunks {
 		deleteChunkFromStore(chunk.File)
-		delete(announcement, gh)
-	}
-	if err := saveAnnouncement(announcement); err != nil {
-		slog.Error("failed to save announcement after layer delete", "error", err)
 	}
 
-	config.MapLayers = newLayers
-	if err := config.Save(""); err != nil {
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+	// Clear any stale chunking job
+	if chunker != nil {
+		chunker.ClearJob(id)
+	}
+
+	layers = newLayers
+	if err := SaveLayers(config.DataDir); err != nil {
+		http.Error(w, "Failed to save layers", http.StatusInternalServerError)
 		return
 	}
 
@@ -1026,8 +1003,8 @@ func handleDeleteLayer(w http.ResponseWriter, r *http.Request, id string) {
 func handleDeleteLayerChunk(w http.ResponseWriter, r *http.Request, layerID, geohash string) {
 	// Find the layer
 	var layerIdx int = -1
-	for i := range config.MapLayers {
-		if config.MapLayers[i].ID == layerID {
+	for i := range layers {
+		if layers[i].ID == layerID {
 			layerIdx = i
 			break
 		}
@@ -1037,7 +1014,7 @@ func handleDeleteLayerChunk(w http.ResponseWriter, r *http.Request, layerID, geo
 		return
 	}
 
-	chunk, exists := config.MapLayers[layerIdx].Chunks[geohash]
+	chunk, exists := layers[layerIdx].Chunks[geohash]
 	if !exists {
 		http.Error(w, "Chunk not found in layer", http.StatusNotFound)
 		return
@@ -1046,16 +1023,9 @@ func handleDeleteLayerChunk(w http.ResponseWriter, r *http.Request, layerID, geo
 	// Delete file from store
 	deleteChunkFromStore(chunk.File)
 
-	// Remove from layer config
-	delete(config.MapLayers[layerIdx].Chunks, geohash)
-	config.Save("")
-
-	// Remove from announcement
-	announcement, err := loadAnnouncement()
-	if err == nil {
-		delete(announcement, geohash)
-		saveAnnouncement(announcement)
-	}
+	// Remove from layer
+	delete(layers[layerIdx].Chunks, geohash)
+	SaveLayers(config.DataDir)
 
 	// Republish
 	go func() {
@@ -1079,9 +1049,9 @@ func handleRetryChunk(w http.ResponseWriter, r *http.Request, layerID, geohash s
 	}
 
 	var layer *MapLayer
-	for i := range config.MapLayers {
-		if config.MapLayers[i].ID == layerID {
-			layer = &config.MapLayers[i]
+	for i := range layers {
+		if layers[i].ID == layerID {
+			layer = &layers[i]
 			break
 		}
 	}
@@ -1091,9 +1061,9 @@ func handleRetryChunk(w http.ResponseWriter, r *http.Request, layerID, geohash s
 	}
 
 	var source *Source
-	for i := range config.Sources {
-		if config.Sources[i].ID == layer.SourceID {
-			source = &config.Sources[i]
+	for i := range sources {
+		if sources[i].ID == layer.SourceID {
+			source = &sources[i]
 			break
 		}
 	}
@@ -1121,9 +1091,9 @@ func handleRetryErrors(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	var layer *MapLayer
-	for i := range config.MapLayers {
-		if config.MapLayers[i].ID == id {
-			layer = &config.MapLayers[i]
+	for i := range layers {
+		if layers[i].ID == id {
+			layer = &layers[i]
 			break
 		}
 	}
@@ -1143,9 +1113,9 @@ func handleRetryErrors(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	var source *Source
-	for i := range config.Sources {
-		if config.Sources[i].ID == layer.SourceID {
-			source = &config.Sources[i]
+	for i := range sources {
+		if sources[i].ID == layer.SourceID {
+			source = &sources[i]
 			break
 		}
 	}
@@ -1177,9 +1147,9 @@ func handleStartLayerChunking(w http.ResponseWriter, r *http.Request, id string)
 
 	// Find the layer
 	var layer *MapLayer
-	for i := range config.MapLayers {
-		if config.MapLayers[i].ID == id {
-			layer = &config.MapLayers[i]
+	for i := range layers {
+		if layers[i].ID == id {
+			layer = &layers[i]
 			break
 		}
 	}
@@ -1190,9 +1160,9 @@ func handleStartLayerChunking(w http.ResponseWriter, r *http.Request, id string)
 
 	// Find the source
 	var source *Source
-	for i := range config.Sources {
-		if config.Sources[i].ID == layer.SourceID {
-			source = &config.Sources[i]
+	for i := range sources {
+		if sources[i].ID == layer.SourceID {
+			source = &sources[i]
 			break
 		}
 	}
@@ -1222,7 +1192,7 @@ func handleGetLayerStatus(w http.ResponseWriter, r *http.Request, id string) {
 	job := chunker.GetJob(id)
 	if job == nil {
 		// Return layer status instead
-		for _, l := range config.MapLayers {
+		for _, l := range layers {
 			if l.ID == id {
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1276,42 +1246,45 @@ func deleteChunkFromStore(filename string) {
 }
 
 // ============================================================================
-// Announcement Management
+// Helpers
 // ============================================================================
 
-type ChunkInfo struct {
-	BBox    [4]float64 `json:"bbox"`
-	File    string     `json:"file"`
-	MaxZoom int        `json:"maxZoom"`
-	Size    int64      `json:"size,omitempty"`
+// aggregateChunks collects all chunks from all layers into a flat map
+func aggregateChunks() map[string]ChunkInfo {
+	all := make(map[string]ChunkInfo)
+	for _, l := range layers {
+		for gh, chunk := range l.Chunks {
+			all[gh] = chunk
+		}
+	}
+	return all
 }
 
-func loadAnnouncement() (map[string]ChunkInfo, error) {
-	path := filepath.Join(config.DataDir, "announcement.json")
-
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return make(map[string]ChunkInfo), nil
+// buildLayerAnnouncement builds a LayerAnnouncement from the current layers.
+// Includes any layer that has data (chunks or file), regardless of status,
+// so partial progress during chunking is visible in the announcement.
+func buildLayerAnnouncement() LayerAnnouncement {
+	var announceLayers []Layer
+	for _, ml := range layers {
+		if ml.File == "" && len(ml.Chunks) == 0 {
+			continue
+		}
+		layer := Layer{
+			ID:             ml.ID,
+			Title:          ml.Title,
+			BlossomServer:  config.BaseURL,
+			DefaultEnabled: true,
+			DefaultOpacity: 1.0,
+		}
+		if ml.File != "" {
+			layer.File = ml.File + ".pmtiles"
+			layer.Kind = "file"
+			layer.PMTilesType = ml.TileType
+		} else {
+			layer.Kind = "chunked-vector"
+			layer.Announcement = ml.Chunks
+		}
+		announceLayers = append(announceLayers, layer)
 	}
-	if err != nil {
-		return nil, err
-	}
-
-	var announcement map[string]ChunkInfo
-	if err := json.Unmarshal(data, &announcement); err != nil {
-		return nil, err
-	}
-
-	return announcement, nil
-}
-
-func saveAnnouncement(announcement map[string]ChunkInfo) error {
-	path := filepath.Join(config.DataDir, "announcement.json")
-
-	data, err := json.MarshalIndent(announcement, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(path, data, 0644)
+	return LayerAnnouncement{Layers: announceLayers}
 }
