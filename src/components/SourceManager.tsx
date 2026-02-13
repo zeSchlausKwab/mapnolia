@@ -24,6 +24,7 @@ import {
   getLayers,
   addLayer,
   deleteLayer,
+  updateLayer,
   deleteLayerChunk,
   startLayerChunking,
   getLayerStatus,
@@ -71,8 +72,12 @@ export function SourceManager() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Source editing
-  const [editingSourceUrl, setEditingSourceUrl] = useState<string | null>(null); // source ID being edited
+  const [editingSourceUrl, setEditingSourceUrl] = useState<string | null>(null);
   const [editUrlValue, setEditUrlValue] = useState("");
+
+  // Layer title editing
+  const [editingLayerTitle, setEditingLayerTitle] = useState<string | null>(null);
+  const [editLayerTitleValue, setEditLayerTitleValue] = useState("");
 
   // Announcement viewer
   const [announcementEvent, setAnnouncementEvent] = useState<any>(null);
@@ -801,7 +806,40 @@ export function SourceManager() {
                       <Layers className="h-4 w-4 shrink-0 text-muted-foreground" />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="font-medium">{layer.title || layer.id}</span>
+                          {editingLayerTitle === layer.id ? (
+                            <span className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                              <Input
+                                value={editLayerTitleValue}
+                                onChange={e => setEditLayerTitleValue(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === "Enter") {
+                                    updateLayer(layer.id, { title: editLayerTitleValue }).then(loadData);
+                                    setEditingLayerTitle(null);
+                                  } else if (e.key === "Escape") {
+                                    setEditingLayerTitle(null);
+                                  }
+                                }}
+                                className="h-6 text-sm font-medium w-48"
+                                autoFocus
+                              />
+                              <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => { updateLayer(layer.id, { title: editLayerTitleValue }).then(loadData); setEditingLayerTitle(null); }}>
+                                <Check className="h-3 w-3" />
+                              </Button>
+                              <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => setEditingLayerTitle(null)}>
+                                <X className="h-3 w-3" />
+                              </Button>
+                            </span>
+                          ) : (
+                            <span className="font-medium group/title">
+                              {layer.title || layer.id}
+                              <button
+                                className="ml-1.5 opacity-0 group-hover/title:opacity-100 transition-opacity"
+                                onClick={e => { e.stopPropagation(); setEditingLayerTitle(layer.id); setEditLayerTitleValue(layer.title || layer.id); }}
+                              >
+                                <Pencil className="h-3 w-3 text-muted-foreground" />
+                              </button>
+                            </span>
+                          )}
                           <span className={`text-xs px-2 py-0.5 rounded ${statusColors[layer.status]}`}>
                             {layer.status === "chunking" && job ? `${(job.progress ?? 0).toFixed(0)}%` : layer.status}
                           </span>
@@ -830,7 +868,7 @@ export function SourceManager() {
                           </Button>
                         )}
                         {layer.status === "chunking" && (
-                          <Button size="sm" variant="outline" onClick={() => cancelChunking(layer.id).then(loadAll)}>
+                          <Button size="sm" variant="outline" onClick={() => cancelChunking(layer.id).then(loadData)}>
                             <Square className="h-3 w-3 mr-1" />
                             Stop
                           </Button>

@@ -259,6 +259,16 @@ export async function addLayer(layer: Omit<MapLayer, "status" | "error">): Promi
   return res.json();
 }
 
+export async function updateLayer(id: string, updates: { title?: string }): Promise<MapLayer> {
+  const res = await fetch(`${API_BASE}/layers/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) throw new Error("Failed to update layer");
+  return res.json();
+}
+
 export async function deleteLayer(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/layers/${id}`, {
     method: "DELETE",

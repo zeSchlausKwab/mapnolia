@@ -226,6 +226,9 @@ func (r *Router) handleAPI(w http.ResponseWriter, req *http.Request) {
 		rest := strings.TrimPrefix(path, "/layers/")
 		parts := strings.SplitN(rest, "/chunks/", 2)
 		handleDeleteLayerChunk(w, req, parts[0], parts[1])
+	case strings.HasPrefix(path, "/layers/") && req.Method == http.MethodPatch:
+		id := strings.TrimPrefix(path, "/layers/")
+		handleUpdateLayer(w, req, id)
 	case strings.HasPrefix(path, "/layers/") && req.Method == http.MethodDelete:
 		id := strings.TrimPrefix(path, "/layers/")
 		handleDeleteLayer(w, req, id)
@@ -944,6 +947,45 @@ func handleAddLayer(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(layer)
+}
+
+func handleUpdateLayer(w http.ResponseWriter, r *http.Request, id string) {
+	var updates map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	var layerIdx int = -1
+	for i := range layers {
+		if layers[i].ID == id {
+			layerIdx = i
+			break
+		}
+	}
+	if layerIdx < 0 {
+		http.Error(w, "Layer not found", http.StatusNotFound)
+		return
+	}
+
+	if title, ok := updates["title"].(string); ok {
+		layers[layerIdx].Title = title
+	}
+
+	if err := SaveLayers(config.DataDir); err != nil {
+		http.Error(w, "Failed to save layers", http.StatusInternalServerError)
+		return
+	}
+
+	// Republish announcement with updated title
+	go func() {
+		pubCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		PublishAnnouncement(pubCtx)
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(layers[layerIdx])
 }
 
 func handleDeleteLayer(w http.ResponseWriter, r *http.Request, id string) {
