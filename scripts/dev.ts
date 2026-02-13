@@ -62,7 +62,7 @@ async function runProcess(
 }
 
 async function main() {
-  console.log("🗺️  Starting blosmap development environment...\n");
+  console.log("🗺️  Starting mapnolia development environment...\n");
 
   // Start all services
   await Promise.all([

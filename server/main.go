@@ -91,7 +91,7 @@ func main() {
 	}
 
 	go func() {
-		slog.Info("🗺️  blosmap server starting",
+		slog.Info("🗺️  mapnolia server starting",
 			"address", config.Address(),
 			"dataDir", config.DataDir,
 			"baseURL", config.BaseURL,
@@ -365,7 +365,7 @@ func handleGetInfo(w http.ResponseWriter, r *http.Request) {
 		"picture":  config.Picture,
 		"baseURL":  config.BaseURL,
 		"version":  "0.1.0",
-		"software": "blosmap",
+		"software": "mapnolia",
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -505,7 +505,7 @@ func handleAnnouncementPreview(w http.ResponseWriter, r *http.Request) {
 
 	preview := map[string]interface{}{
 		"kind":    34444,
-		"tags":    [][]string{{"d", "blosmap"}, {"name", config.Name}, {"about", config.About}},
+		"tags":    [][]string{{"d", "mapnolia"}, {"name", config.Name}, {"about", config.About}},
 		"content": announcement,
 	}
 
@@ -1011,7 +1011,7 @@ func handleDeleteLayer(w http.ResponseWriter, r *http.Request, id string) {
 		if err == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := store.Delete(ctx, hash, "blosmap"); err != nil {
+			if err := store.Delete(ctx, hash, "mapnolia"); err != nil {
 				slog.Error("failed to delete file layer blob", "hash", deletedLayer.File, "error", err)
 			}
 		}
@@ -1302,7 +1302,7 @@ func deleteChunkFromStore(filename string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := store.Delete(ctx, hash, "blosmap"); err != nil {
+	if err := store.Delete(ctx, hash, "mapnolia"); err != nil {
 		slog.Error("failed to delete from store", "hash", hexHash, "error", err)
 	}
 }

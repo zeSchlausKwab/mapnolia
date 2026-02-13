@@ -110,7 +110,7 @@ export function ServerInfo() {
     <Card>
       <CardHeader>
         <CardTitle>Server Info</CardTitle>
-        <CardDescription>Configure your blosmap server identity</CardDescription>
+        <CardDescription>Configure your mapnolia server identity</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {/* Nostr Identity */}

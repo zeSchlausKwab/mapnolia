@@ -1,4 +1,4 @@
-module github.com/blosmap/server
+module github.com/zeSchlausKwab/mapnolia/server
 
 go 1.25
 

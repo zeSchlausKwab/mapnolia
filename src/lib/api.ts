@@ -1,4 +1,4 @@
-// API client for blosmap backend
+// API client for mapnolia backend
 
 const API_BASE = "/api";
 

@@ -49,5 +49,5 @@ const server = serve({
   },
 });
 
-console.log(`🗺️  blosmap frontend running at ${server.url}`);
+console.log(`🗺️  mapnolia frontend running at ${server.url}`);
 console.log(`   Proxying /api/* to ${BACKEND_URL}`);

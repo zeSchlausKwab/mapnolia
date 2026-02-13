@@ -774,7 +774,7 @@ func (c *Chunker) registerLeafChunk(
 		job.Progress = float64(job.DoneChunks) / float64(job.TotalChunks) * 100
 		return
 	}
-	meta, err := store.Save(ctx, f, "blosmap")
+	meta, err := store.Save(ctx, f, "mapnolia")
 	f.Close()
 	os.Remove(path) // Clean up temp extract file
 	if err != nil {

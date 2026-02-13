@@ -61,7 +61,7 @@ func PublishAnnouncement(ctx context.Context) error {
 		PubKey:    pubkey,
 		CreatedAt: nostr.Timestamp(time.Now().Unix()),
 		Tags: nostr.Tags{
-			{"d", "blosmap"},
+			{"d", "mapnolia"},
 			{"name", config.Name},
 			{"about", config.About},
 		},

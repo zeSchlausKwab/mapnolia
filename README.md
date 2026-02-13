@@ -1,4 +1,4 @@
-# blosmap
+# mapnolia
 
 A geospatial data server that chunks [PMTiles](https://pmtiles.io/) map archives into geographic regions, stores them as content-addressed blobs via the [Blossom](https://github.com/hzrd149/blossom) protocol, and announces them over [Nostr](https://nostr.com/) for decentralized map tile discovery.
 
@@ -10,7 +10,7 @@ flowchart LR
         PM[PMTiles File<br/><small>local or remote URL</small>]
     end
 
-    subgraph blosmap
+    subgraph mapnolia
         CH[Chunker]
         BS[Blob Store<br/><small>blisk / SHA-256</small>]
         API[HTTP API]
@@ -30,7 +30,153 @@ flowchart LR
     NR -->|discover chunks| CL
 ```
 
-A PMTiles file contains an entire map tileset in a single archive. blosmap splits it into **geohash-based chunks** — each chunk is a standalone `.pmtiles` file covering a geographic region. These chunks are stored in a content-addressed blob store and served via the Blossom protocol (HTTP + SHA-256 addressing). A Nostr event (kind 34444) announces the chunk index so any compatible client can discover and fetch tiles by region.
+A PMTiles file contains an entire map tileset in a single archive. mapnolia splits it into **geohash-based chunks** — each chunk is a standalone `.pmtiles` file covering a geographic region. These chunks are stored in a content-addressed blob store and served via the Blossom protocol (HTTP + SHA-256 addressing). A Nostr event (kind 34444) announces the chunk index so any compatible client can discover and fetch tiles by region.
+
+## Getting Started
+
+### Prerequisites
+
+- [pmtiles CLI](https://github.com/protomaps/go-pmtiles/releases) — must be in `PATH` or `./bin/`
+
+### 1. Download the release binary
+
+```bash
+mkdir mapnolia && cd mapnolia
+
+# Download the latest release
+curl -L -o mapnolia-server https://github.com/zeSchlausKwab/mapnolia/releases/latest/download/mapnolia-server-linux-amd64
+chmod +x mapnolia-server
+
+# Download pmtiles CLI
+curl -L https://github.com/protomaps/go-pmtiles/releases/download/v1.22.3/go-pmtiles_1.22.3_Linux_x86_64.tar.gz | tar -xz pmtiles
+mkdir -p bin && mv pmtiles bin/
+```
+
+### 2. Create a config file
+
+```bash
+cat > mapnolia.config.json << 'EOF'
+{
+  "name": "My Map Server",
+  "adminPubkey": "",
+  "about": "A Blossom server for PMTiles map data",
+  "host": "0.0.0.0",
+  "port": 3544,
+  "baseURL": "https://blossom.example.com",
+  "dataDir": "./data",
+  "diskQuotaGB": 10,
+  "privateKey": "",
+  "relays": [
+    "wss://relay.wavefunc.live"
+  ]
+}
+EOF
+```
+
+Set `baseURL` to your server's public URL. You can leave `privateKey` empty — generate one from the dashboard after starting.
+
+### 3. Run with pm2
+
+```bash
+npm i -g pm2
+pm2 start ./mapnolia-server --name mapnolia
+pm2 save
+pm2 startup
+```
+
+### 4. Set up a reverse proxy
+
+Example with [Caddy](https://caddyserver.com/) (auto-TLS):
+
+```
+blossom.example.com {
+    reverse_proxy localhost:3544
+}
+```
+
+All routes (Blossom blobs, API, dashboard) are handled by the single binary.
+
+### 5. Open the dashboard
+
+Go to `https://blossom.example.com/dashboard`. From there you can:
+
+- Generate a Nostr keypair (if you left `privateKey` empty)
+- Add PMTiles sources (local file paths or remote URLs)
+- Create layers and start chunking
+- Publish your chunk announcement to Nostr relays
+
+### Docker
+
+Alternatively, run with Docker:
+
+```bash
+git clone https://github.com/zeSchlausKwab/mapnolia.git mapnolia-src
+cd mapnolia-src
+docker build -t mapnolia .
+cd ..
+
+docker run -d \
+  --name mapnolia \
+  --restart unless-stopped \
+  -p 3544:3544 \
+  -v ./data:/data \
+  -v ./mapnolia.config.json:/mapnolia.config.json \
+  mapnolia
+```
+
+The Docker image includes the pmtiles CLI, so you don't need to install it separately.
+
+### Build from Source
+
+Requires [Go](https://go.dev/) 1.25+, [Bun](https://bun.sh/), and the [pmtiles CLI](https://github.com/protomaps/go-pmtiles/releases) in `PATH` or `./bin/`.
+
+```bash
+git clone https://github.com/zeSchlausKwab/mapnolia.git
+cd mapnolia
+cp mapnolia.config.example.json mapnolia.config.json
+# Edit mapnolia.config.json — set baseURL, relays, etc.
+
+bun install
+bun run build:all
+./bin/mapnolia-server
+```
+
+## Configuration
+
+mapnolia looks for config files in this order:
+
+1. `mapnolia.config.json` (current directory)
+2. `../mapnolia.config.json`
+3. `config.json`
+4. `~/.config/mapnolia/config.json`
+
+### Config Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | `"My Map Server"` | Server name shown in the dashboard and Nostr announcement |
+| `about` | string | `""` | Server description |
+| `picture` | string | `""` | Server avatar URL |
+| `adminPubkey` | string | `""` | Nostr hex pubkey. If set, only this pubkey can access the dashboard. If empty, the dashboard is open to anyone. |
+| `host` | string | `"0.0.0.0"` | Listen address |
+| `port` | int | `3544` | Listen port |
+| `baseURL` | string | `"http://localhost:3544"` | Public URL used in blob references and Nostr announcements. **Set this to your server's public URL.** |
+| `dataDir` | string | `"./data"` | Directory for blob storage, downloads, and metadata |
+| `diskQuotaGB` | float | `10` | Maximum disk usage in gigabytes for stored blobs |
+| `privateKey` | string | `""` | Nostr private key (`nsec1...` or hex). Used to sign announcements. Can be generated from the dashboard. |
+| `relays` | string[] | `[]` | Nostr relay URLs to publish announcements to |
+
+### Environment Variables
+
+All config values can be overridden with environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MAPNOLIA_HOST` | Listen address | `0.0.0.0` |
+| `MAPNOLIA_PORT` | Listen port | `3544` |
+| `MAPNOLIA_BASE_URL` | Public URL for blob references | `http://localhost:3544` |
+| `MAPNOLIA_DATA_DIR` | Data storage directory | `./data` |
+| `MAPNOLIA_PRIVATE_KEY` | Nostr private key (nsec or hex) | — |
 
 ## Architecture
 
@@ -71,94 +217,6 @@ flowchart TD
 
 The world is divided into **geohash regions** at a configurable precision level. Each region is extracted as a standalone PMTiles file using the `pmtiles` CLI. If a chunk exceeds `maxChunkSize`, it's recursively subdivided into finer geohashes up to `maxPrecision` depth.
 
-## Quick Start
-
-### Prerequisites
-
-- [Go](https://go.dev/) 1.25+
-- [Bun](https://bun.sh/)
-- [pmtiles CLI](https://github.com/protomaps/go-pmtiles) (must be in `PATH` or `./bin/`)
-
-### Development
-
-```bash
-# Install frontend dependencies
-bun install
-
-# Start all services (relay + backend + frontend with HMR)
-bun dev
-```
-
-This starts three processes:
-
-| Service  | URL                      | Description                    |
-|----------|--------------------------|--------------------------------|
-| Frontend | http://localhost:3001     | React dashboard with HMR       |
-| Backend  | http://localhost:3544     | Go API + Blossom blob server    |
-| Relay    | ws://localhost:10547      | Local Nostr relay (nak serve)   |
-
-```mermaid
-graph LR
-    DEV[bun dev]
-    DEV --> FE["Frontend :3001<br/><small>bun --hot src/index.ts</small>"]
-    DEV --> BE["Backend :3544<br/><small>go run ./server</small>"]
-    DEV --> RL["Relay :10547<br/><small>nak serve</small>"]
-    FE -->|"proxy /api/*"| BE
-    BE -->|publish events| RL
-```
-
-### Production Build
-
-```bash
-# Build frontend + Go binary in one step
-bun run build:all
-
-# Run the self-contained binary
-./bin/blosmap-server
-```
-
-The Go binary embeds the built frontend. Access the dashboard at `http://localhost:3544/dashboard`.
-
-## Configuration
-
-blosmap looks for config files in this order:
-
-1. `blosmap.config.json` (current directory)
-2. `../blosmap.config.json`
-3. `config.json`
-4. `~/.config/blosmap/config.json`
-
-### Example Configuration
-
-```json
-{
-  "name": "My Map Server",
-  "about": "PMTiles chunks served via Blossom",
-  "host": "0.0.0.0",
-  "port": 3544,
-  "baseURL": "https://maps.example.com",
-  "dataDir": "./data",
-  "diskQuotaGB": 10,
-  "privateKey": "nsec1...",
-  "relays": [
-    "wss://relay.damus.io",
-    "wss://nos.lol"
-  ]
-}
-```
-
-### Environment Variables
-
-All config values can be overridden with environment variables:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `BLOSMAP_HOST` | Listen address | `0.0.0.0` |
-| `BLOSMAP_PORT` | Listen port | `3544` |
-| `BLOSMAP_BASE_URL` | Public URL for blob references | `http://localhost:3544` |
-| `BLOSMAP_DATA_DIR` | Data storage directory | `./data` |
-| `BLOSMAP_PRIVATE_KEY` | Nostr private key (nsec or hex) | — |
-
 ## API
 
 ### Blossom Protocol
@@ -198,9 +256,11 @@ All config values can be overridden with environment variables:
 |--------|------|-------------|
 | `GET` | `/api/layers` | List all layers |
 | `POST` | `/api/layers` | Create a layer |
+| `PATCH` | `/api/layers/:id` | Update layer title |
 | `DELETE` | `/api/layers/:id` | Delete layer and its chunks |
 | `POST` | `/api/layers/:id/chunk` | Start chunking process |
 | `GET` | `/api/layers/:id/status` | Get chunking progress |
+| `POST` | `/api/layers/:id/cancel` | Cancel chunking in progress |
 | `POST` | `/api/layers/:id/chunks/:geohash/retry` | Retry failed chunk |
 | `POST` | `/api/layers/:id/retry-errors` | Retry all failed chunks |
 | `DELETE` | `/api/layers/:id/chunks/:geohash` | Delete specific chunk |
@@ -215,16 +275,16 @@ All config values can be overridden with environment variables:
 
 ## Nostr Announcement
 
-blosmap publishes a **kind 34444** parametrized replaceable event containing the chunk index:
+mapnolia publishes a **kind 34444** parametrized replaceable event containing the chunk index:
 
 ```json
 {
   "kind": 34444,
   "tags": [
-    ["d", "blosmap"],
+    ["d", "mapnolia"],
     ["name", "My Map Server"],
     ["about", "PMTiles chunks served via Blossom"],
-    ["r", "wss://relay.damus.io"]
+    ["r", "wss://relay.wavefunc.live"]
   ],
   "content": "{\"layers\":[{\"id\":\"basemap\",\"title\":\"OpenStreetMap Basemap\",\"kind\":\"chunked-vector\",\"blossomServer\":\"https://maps.example.com\",\"announcement\":{\"9\":{\"bbox\":[-135,0,-90,45],\"file\":\"9b4565...pmtiles\",\"maxZoom\":15,\"size\":7393300494}},\"defaultEnabled\":true,\"defaultOpacity\":1}]}"
 }
@@ -232,10 +292,58 @@ blosmap publishes a **kind 34444** parametrized replaceable event containing the
 
 Clients discover the announcement from Nostr relays, then fetch individual chunks from the Blossom server using HTTP Range requests — only downloading tiles for the geographic area being viewed.
 
-## Project Structure
+## Development
+
+### Prerequisites
+
+- [Go](https://go.dev/) 1.25+
+- [Bun](https://bun.sh/)
+- [pmtiles CLI](https://github.com/protomaps/go-pmtiles) (must be in `PATH` or `./bin/`)
+
+### Dev Server
+
+```bash
+# Install frontend dependencies
+bun install
+
+# Start all services (relay + backend + frontend with HMR)
+bun dev
+```
+
+This starts three processes:
+
+| Service  | URL                      | Description                    |
+|----------|--------------------------|--------------------------------|
+| Frontend | http://localhost:3001     | React dashboard with HMR       |
+| Backend  | http://localhost:3544     | Go API + Blossom blob server    |
+| Relay    | ws://localhost:10547      | Local Nostr relay (nak serve)   |
+
+```mermaid
+graph LR
+    DEV[bun dev]
+    DEV --> FE["Frontend :3001<br/><small>bun --hot src/index.ts</small>"]
+    DEV --> BE["Backend :3544<br/><small>go run ./server</small>"]
+    DEV --> RL["Relay :10547<br/><small>nak serve</small>"]
+    FE -->|"proxy /api/*"| BE
+    BE -->|publish events| RL
+```
+
+### Scripts
+
+| Command | Description |
+|---------|-------------|
+| `bun dev` | Start all services (relay + backend + frontend) |
+| `bun dev:frontend` | Frontend only with hot reload |
+| `bun dev:backend` | Go backend only |
+| `bun dev:relay` | Local Nostr relay only |
+| `bun run build` | Build frontend to `server/dashboard/` |
+| `bun run build:backend` | Compile Go binary to `bin/mapnolia-server` |
+| `bun run build:all` | Build frontend then Go binary (single command) |
+
+### Project Structure
 
 ```
-blosmap/
+mapnolia/
 ├── server/                  # Go backend
 │   ├── main.go              # HTTP router, API handlers, Blossom hooks
 │   ├── config.go            # Configuration loading and persistence
@@ -257,12 +365,12 @@ blosmap/
 ├── scripts/
 │   └── dev.ts               # Development environment orchestrator
 ├── build.ts                 # Frontend build script
-├── blosmap.config.example.json  # Example configuration
+├── mapnolia.config.example.json  # Example configuration
 ├── Dockerfile
 └── package.json
 ```
 
-## Data Storage
+### Data Storage
 
 Chunks are stored in the data directory using [blisk](https://github.com/pippellia-btc/blisk), a content-addressed blob store backed by SQLite:
 
@@ -275,60 +383,6 @@ data/
 ├── sources.json        # PMTiles source metadata
 └── layers.json         # Layer configs and chunk mappings
 ```
-
-## Scripts
-
-| Command | Description |
-|---------|-------------|
-| `bun dev` | Start all services (relay + backend + frontend) |
-| `bun dev:frontend` | Frontend only with hot reload |
-| `bun dev:backend` | Go backend only |
-| `bun dev:relay` | Local Nostr relay only |
-| `bun run build` | Build frontend to `server/dashboard/` |
-| `bun run build:backend` | Compile Go binary to `bin/blosmap-server` |
-| `bun run build:all` | Build frontend then Go binary (single command) |
-
-## Deployment
-
-### Setup
-
-```bash
-# Copy the example config and edit it
-cp blosmap.config.example.json blosmap.config.json
-
-# Set your public URL, private key (or generate one from the dashboard), and relays
-# Then run the server
-```
-
-### Single Binary
-
-Requires [pmtiles CLI](https://github.com/protomaps/go-pmtiles/releases) in `PATH` or `./bin/`.
-
-```bash
-# Build from source
-bun install && bun run build:all
-
-# Run
-./bin/blosmap-server
-# Dashboard at :3544/dashboard, API at :3544/api, blobs at :3544/<hash>
-```
-
-### Docker
-
-```bash
-docker build -t blosmap .
-docker run -p 3544:3544 -v ./data:/data -v ./blosmap.config.json:/blosmap.config.json blosmap
-```
-
-### With Reverse Proxy (Caddy)
-
-```
-maps.example.com {
-    reverse_proxy localhost:3544
-}
-```
-
-All routes are handled by the Go server — Blossom blob serving, API, and dashboard.
 
 ## License
 

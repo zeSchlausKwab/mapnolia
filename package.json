@@ -1,5 +1,5 @@
 {
-  "name": "blosmap",
+  "name": "mapnolia",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
     "dev:relay": "nak serve",
     "start": "NODE_ENV=production bun src/index.ts",
     "build": "bun run build.ts",
-    "build:backend": "cd server && go build -o ../bin/blosmap-server .",
+    "build:backend": "cd server && go build -o ../bin/mapnolia-server .",
     "build:all": "bun run build && bun run build:backend"
   },
   "dependencies": {

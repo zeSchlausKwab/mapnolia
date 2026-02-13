@@ -184,7 +184,7 @@ func (c *Config) Address() string {
 // DefaultConfig returns sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
-		Name:      "blosmap server",
+		Name:      "mapnolia server",
 		About:     "A Blossom server for PMTiles map data",
 		Host:      "0.0.0.0",
 		Port:      3544,
@@ -205,10 +205,10 @@ func LoadConfig() (*Config, error) {
 
 	// Try to load from config file
 	configPaths := []string{
-		"blosmap.config.json",
-		"../blosmap.config.json", // when running from server/ directory
+		"mapnolia.config.json",
+		"../mapnolia.config.json", // when running from server/ directory
 		"config.json",
-		filepath.Join(os.Getenv("HOME"), ".config", "blosmap", "config.json"),
+		filepath.Join(os.Getenv("HOME"), ".config", "mapnolia", "config.json"),
 	}
 
 	var configData []byte
@@ -231,19 +231,19 @@ func LoadConfig() (*Config, error) {
 	}
 
 	// Environment overrides
-	if host := os.Getenv("BLOSMAP_HOST"); host != "" {
+	if host := os.Getenv("MAPNOLIA_HOST"); host != "" {
 		config.Host = host
 	}
-	if port := os.Getenv("BLOSMAP_PORT"); port != "" {
+	if port := os.Getenv("MAPNOLIA_PORT"); port != "" {
 		fmt.Sscanf(port, "%d", &config.Port)
 	}
-	if baseURL := os.Getenv("BLOSMAP_BASE_URL"); baseURL != "" {
+	if baseURL := os.Getenv("MAPNOLIA_BASE_URL"); baseURL != "" {
 		config.BaseURL = baseURL
 	}
-	if dataDir := os.Getenv("BLOSMAP_DATA_DIR"); dataDir != "" {
+	if dataDir := os.Getenv("MAPNOLIA_DATA_DIR"); dataDir != "" {
 		config.DataDir = dataDir
 	}
-	if privateKey := os.Getenv("BLOSMAP_PRIVATE_KEY"); privateKey != "" {
+	if privateKey := os.Getenv("MAPNOLIA_PRIVATE_KEY"); privateKey != "" {
 		config.PrivateKey = privateKey
 	}
 
@@ -265,7 +265,7 @@ func (c *Config) Save(path string) error {
 	}
 	if path == "" {
 		// Default to parent directory (project root)
-		path = "../blosmap.config.json"
+		path = "../mapnolia.config.json"
 	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {

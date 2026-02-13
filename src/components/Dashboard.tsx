@@ -17,7 +17,7 @@ export function Dashboard() {
       const data = await getInfo();
       setInfo(data);
     } catch (e) {
-      setError("Could not connect to blosmap server");
+      setError("Could not connect to mapnolia server");
     }
   }
 
@@ -30,7 +30,7 @@ export function Dashboard() {
           </h2>
           <p className="text-muted-foreground">{error}</p>
           <p className="text-sm text-muted-foreground mt-2">
-            Make sure the blosmap server is running on the expected port.
+            Make sure the mapnolia server is running on the expected port.
           </p>
         </div>
       </div>
@@ -43,7 +43,7 @@ export function Dashboard() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">
-            {info?.name || "blosmap"}
+            {info?.name || "mapnolia"}
           </h1>
           <p className="text-muted-foreground">
             {info?.software} v{info?.version}

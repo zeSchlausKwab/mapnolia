@@ -37,7 +37,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 server/dashboard/*
 !server/dashboard/.gitkeep
 
-# blosmap data directory and database files
+# mapnolia data directory and database files
 server/data/
 data/
 *.sqlite
@@ -45,10 +45,10 @@ data/
 *.sqlite-shm
 
 # Config (contains private keys)
-blosmap.config.json
+mapnolia.config.json
 
 # Built binaries
-bin/blosmap-server
+bin/mapnolia-server
 
 # PMTiles CLI binaries (users install separately)
 bin/pmtiles-*
