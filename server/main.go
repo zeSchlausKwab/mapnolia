@@ -407,6 +407,11 @@ func handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Include admin pubkey if configured
+	if config.AdminPubkey != "" {
+		publicConfig["adminPubkey"] = config.AdminPubkey
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(publicConfig)
 }

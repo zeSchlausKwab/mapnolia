@@ -38,6 +38,7 @@ export interface Config {
   diskQuota: number;
   hasKeypair: boolean;
   npub?: string;
+  adminPubkey?: string;
 }
 
 export async function getInfo(): Promise<ServerInfo> {

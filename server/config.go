@@ -27,8 +27,9 @@ type Config struct {
 	DiskQuota int64  `json:"diskQuota"` // bytes
 
 	// Nostr
-	PrivateKey string   `json:"privateKey"` // hex or nsec
-	Relays     []string `json:"relays"`
+	PrivateKey  string   `json:"privateKey"`            // hex or nsec
+	AdminPubkey string   `json:"adminPubkey,omitempty"` // hex pubkey of admin user
+	Relays      []string `json:"relays"`
 
 	// PMTiles sources (input files)
 	Sources []Source `json:"sources,omitempty"`
