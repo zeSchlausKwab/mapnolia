@@ -23,8 +23,9 @@ type Config struct {
 	BaseURL string `json:"baseURL"`
 
 	// Storage
-	DataDir   string `json:"dataDir"`
-	DiskQuota int64  `json:"diskQuota"` // bytes
+	DataDir     string  `json:"dataDir"`
+	DiskQuotaGB float64 `json:"diskQuotaGB"` // gigabytes (e.g. 10, 0.5)
+	DiskQuota   int64   `json:"-"`           // computed from DiskQuotaGB
 
 	// Nostr
 	PrivateKey  string   `json:"privateKey"`            // hex or nsec
@@ -189,7 +190,7 @@ func DefaultConfig() *Config {
 		Port:      3544,
 		BaseURL:   "http://localhost:3544",
 		DataDir:   "./data",
-		DiskQuota: 10 * 1024 * 1024 * 1024, // 10GB default
+		DiskQuotaGB: 10, // 10GB default
 		Relays: []string{
 			"ws://localhost:10547", // local nak relay for dev
 			"wss://relay.damus.io",
@@ -245,6 +246,9 @@ func LoadConfig() (*Config, error) {
 	if privateKey := os.Getenv("BLOSMAP_PRIVATE_KEY"); privateKey != "" {
 		config.PrivateKey = privateKey
 	}
+
+	// Convert GB to bytes
+	config.DiskQuota = int64(config.DiskQuotaGB * 1024 * 1024 * 1024)
 
 	// Ensure data directory exists
 	if err := os.MkdirAll(config.DataDir, 0755); err != nil {

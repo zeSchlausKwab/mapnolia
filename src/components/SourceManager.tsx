@@ -29,6 +29,7 @@ import {
   getLayerStatus,
   retryChunk,
   retryLayerErrors,
+  cancelChunking,
   getAnnouncementPreview,
   getConfig,
   blossomUpload,
@@ -39,7 +40,7 @@ import {
   type ChunkJob,
   type Config,
 } from "@/lib/api";
-import { ChevronDown, ChevronRight, Plus, RefreshCw, Loader2, Database, Layers, Trash2, Play, Radio, Pencil, Check, X, Upload, FileUp } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, RefreshCw, Loader2, Database, Layers, Trash2, Play, Radio, Pencil, Check, X, Upload, FileUp, Square } from "lucide-react";
 
 export function SourceManager() {
   const [sources, setSources] = useState<Source[]>([]);
@@ -802,7 +803,7 @@ export function SourceManager() {
                         <div className="flex items-center gap-2">
                           <span className="font-medium">{layer.title || layer.id}</span>
                           <span className={`text-xs px-2 py-0.5 rounded ${statusColors[layer.status]}`}>
-                            {layer.status === "chunking" && job ? `${job.progress.toFixed(0)}%` : layer.status}
+                            {layer.status === "chunking" && job ? `${(job.progress ?? 0).toFixed(0)}%` : layer.status}
                           </span>
                         </div>
                         <div className="text-xs text-muted-foreground mt-0.5">
@@ -829,10 +830,10 @@ export function SourceManager() {
                           </Button>
                         )}
                         {layer.status === "chunking" && (
-                          <span className="flex items-center gap-1.5 text-xs text-muted-foreground px-2">
-                            <Loader2 className="h-3 w-3 animate-spin" />
-                            Chunking...
-                          </span>
+                          <Button size="sm" variant="outline" onClick={() => cancelChunking(layer.id).then(loadAll)}>
+                            <Square className="h-3 w-3 mr-1" />
+                            Stop
+                          </Button>
                         )}
                         <Button variant="ghost" size="sm" onClick={() => handleDeleteLayer(layer.id)} className="text-destructive hover:text-destructive">
                           <Trash2 className="h-4 w-4" />
@@ -851,7 +852,7 @@ export function SourceManager() {
                             <span className="font-medium">{job.doneChunks}/{job.totalChunks}</span>
                           </div>
                           <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
-                            <div className="h-full bg-primary transition-all duration-300" style={{ width: `${job.progress}%` }} />
+                            <div className="h-full bg-primary transition-all duration-300" style={{ width: `${job.progress ?? 0}%` }} />
                           </div>
                           <div className="flex items-center gap-3 mt-1">
                             {job.totalChunks > (job.chunks?.length || 0) && (

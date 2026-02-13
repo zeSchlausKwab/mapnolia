@@ -53,6 +53,7 @@ type ChunkJob struct {
 	CurrentChunk *ChunkProgress `json:"currentChunk,omitempty"`
 	Chunks       []ChunkResult  `json:"chunks,omitempty"`
 	Subdivisions int            `json:"subdivisions"` // count of subdivision operations performed
+	cancel       context.CancelFunc
 }
 
 // PMTilesHeader represents metadata from a PMTiles file
@@ -235,6 +236,36 @@ func findPmtilesBinary() (string, error) {
 	return "", fmt.Errorf("pmtiles binary not found in any expected location")
 }
 
+// ResumeIncompleteJobs restarts chunking for layers interrupted by a server restart
+func (c *Chunker) ResumeIncompleteJobs(ctx context.Context) {
+	for i := range layers {
+		if layers[i].Status != "chunking" {
+			continue
+		}
+
+		layer := &layers[i]
+		var source *Source
+		for j := range sources {
+			if sources[j].ID == layer.SourceID {
+				source = &sources[j]
+				break
+			}
+		}
+		if source == nil {
+			slog.Error("cannot resume chunking: source not found", "layer", layer.ID, "sourceId", layer.SourceID)
+			layers[i].Status = "error"
+			layers[i].Error = "source not found for resume"
+			SaveLayers(config.DataDir)
+			continue
+		}
+
+		slog.Info("resuming interrupted chunking", "layer", layer.ID, "existingChunks", len(layer.Chunks))
+		if err := c.StartChunking(ctx, layer, source); err != nil {
+			slog.Error("failed to resume chunking", "layer", layer.ID, "error", err)
+		}
+	}
+}
+
 // StartChunking begins chunking a layer
 func (c *Chunker) StartChunking(ctx context.Context, layer *MapLayer, source *Source) error {
 	c.mu.Lock()
@@ -243,9 +274,11 @@ func (c *Chunker) StartChunking(ctx context.Context, layer *MapLayer, source *So
 		return fmt.Errorf("chunking already in progress for layer %s", layer.ID)
 	}
 
+	jobCtx, jobCancel := context.WithCancel(context.Background())
 	job := &ChunkJob{
 		SourceID: layer.ID,
 		Status:   "chunking",
+		cancel:   jobCancel,
 	}
 	c.jobs[layer.ID] = job
 	c.mu.Unlock()
@@ -259,7 +292,7 @@ func (c *Chunker) StartChunking(ctx context.Context, layer *MapLayer, source *So
 	}
 	SaveLayers(config.DataDir)
 
-	go c.runChunking(ctx, layer, source, job)
+	go c.runChunking(jobCtx, layer, source, job)
 	return nil
 }
 
@@ -315,10 +348,19 @@ func (c *Chunker) runChunking(ctx context.Context, layer *MapLayer, source *Sour
 	for _, gh := range geohashes {
 		select {
 		case <-ctx.Done():
-			job.Status = "error"
-			job.Error = "cancelled"
+			job.Status = "pending"
+			job.Error = ""
+			slog.Info("chunking cancelled, progress preserved", "layer", layer.ID, "done", job.DoneChunks)
 			return
 		default:
+		}
+
+		// Skip geohashes already completed (supports resume after restart)
+		if isGeohashComplete(layer, gh) {
+			job.DoneChunks++
+			job.Progress = float64(job.DoneChunks) / float64(job.TotalChunks) * 100
+			slog.Info("skipping completed geohash", "geohash", gh)
+			continue
 		}
 
 		bbox := geohashToBBox(gh)
@@ -397,9 +439,11 @@ func (c *Chunker) StartRetry(ctx context.Context, layer *MapLayer, source *Sourc
 		return fmt.Errorf("chunking already in progress for layer %s", layer.ID)
 	}
 
+	jobCtx, jobCancel := context.WithCancel(context.Background())
 	job := &ChunkJob{
 		SourceID: layer.ID,
 		Status:   "chunking",
+		cancel:   jobCancel,
 	}
 	c.jobs[layer.ID] = job
 	c.mu.Unlock()
@@ -413,7 +457,7 @@ func (c *Chunker) StartRetry(ctx context.Context, layer *MapLayer, source *Sourc
 	}
 	SaveLayers(config.DataDir)
 
-	go c.runRetry(ctx, layer, source, job, geohashes)
+	go c.runRetry(jobCtx, layer, source, job, geohashes)
 	return nil
 }
 
@@ -460,8 +504,9 @@ func (c *Chunker) runRetry(ctx context.Context, layer *MapLayer, source *Source,
 	for _, gh := range geohashes {
 		select {
 		case <-ctx.Done():
-			job.Status = "error"
-			job.Error = "cancelled"
+			job.Status = "pending"
+			job.Error = ""
+			slog.Info("chunking cancelled, progress preserved", "layer", layer.ID, "done", job.DoneChunks)
 			return
 		default:
 		}
@@ -693,6 +738,22 @@ func (c *Chunker) processSubdivision(
 	slog.Info("subdivision complete", "parent", parentGH)
 }
 
+// isGeohashComplete checks if a geohash (or any of its subdivided children) is already in layer.Chunks
+func isGeohashComplete(layer *MapLayer, gh string) bool {
+	if layer.Chunks == nil {
+		return false
+	}
+	if _, ok := layer.Chunks[gh]; ok {
+		return true
+	}
+	for key := range layer.Chunks {
+		if strings.HasPrefix(key, gh) {
+			return true
+		}
+	}
+	return false
+}
+
 // registerLeafChunk registers a chunk file with blisk store and updates announcement/config.
 // The temp file at path is cleaned up after registration.
 func (c *Chunker) registerLeafChunk(
@@ -785,19 +846,22 @@ func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox 
 	}
 
 	cmd := exec.CommandContext(ctx, c.pmtilesBin, args...)
-	var stderrBuf strings.Builder
-	cmd.Stderr = &stderrBuf
 
 	slog.Debug("running pmtiles extract", "cmd", append([]string{c.pmtilesBin}, args...))
 
 	// Set current chunk progress before starting
 	job.CurrentChunk = &ChunkProgress{Geohash: ghLabel, Percent: 0}
 
-	// Capture stdout to parse progress bar output from pmtiles
+	// Pipe both stdout and stderr to parse progress (pmtiles may write to either)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		job.CurrentChunk = nil
 		return fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		job.CurrentChunk = nil
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -805,16 +869,17 @@ func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox 
 		return fmt.Errorf("pmtiles extract failed to start: %w", err)
 	}
 
-	// Read stdout in background, parse \r-delimited progress lines
-	// Also collect non-progress lines (pmtiles may write errors to stdout)
+	// Parse \r-delimited progress lines from a reader
 	var stdoutErrors []string
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
+	var stderrErrors []string
+	var wg sync.WaitGroup
+
+	parseOutput := func(r io.Reader, errors *[]string) {
+		defer wg.Done()
 		buf := make([]byte, 4096)
 		var lineBuf []byte
 		for {
-			n, readErr := stdout.Read(buf)
+			n, readErr := r.Read(buf)
 			if n > 0 {
 				for _, b := range buf[:n] {
 					if b == '\r' || b == '\n' {
@@ -831,7 +896,7 @@ func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox 
 								BytesInfo: info,
 							}
 						} else {
-							stdoutErrors = append(stdoutErrors, line)
+							*errors = append(*errors, line)
 						}
 					} else {
 						lineBuf = append(lineBuf, b)
@@ -839,29 +904,30 @@ func (c *Chunker) extractRegion(ctx context.Context, input, output string, bbox 
 				}
 			}
 			if readErr != nil {
-				// Flush remaining buffer
 				if line := strings.TrimSpace(string(lineBuf)); line != "" {
 					if _, _, ok := parseProgressLine(line); !ok {
-						stdoutErrors = append(stdoutErrors, line)
+						*errors = append(*errors, line)
 					}
 				}
 				break
 			}
 		}
-	}()
+	}
+
+	wg.Add(2)
+	go parseOutput(stdout, &stdoutErrors)
+	go parseOutput(stderr, &stderrErrors)
 
 	waitErr := cmd.Wait()
-	<-done // ensure reader goroutine finishes
+	wg.Wait()
 	job.CurrentChunk = nil
 
 	if waitErr != nil {
 		// Collect error info from stderr and stdout
-		errMsg := strings.TrimSpace(stderrBuf.String())
-		if errMsg == "" && len(stdoutErrors) > 0 {
-			errMsg = strings.Join(stdoutErrors, "; ")
-		}
+		allErrors := append(stderrErrors, stdoutErrors...)
+		errMsg := strings.Join(allErrors, "; ")
 		if errMsg != "" {
-			slog.Error("pmtiles extract failed", "ghLabel", ghLabel, "stderr", stderrBuf.String(), "stdout_errors", stdoutErrors)
+			slog.Error("pmtiles extract failed", "ghLabel", ghLabel, "errors", allErrors)
 			return fmt.Errorf("pmtiles extract failed: %s", errMsg)
 		}
 		return fmt.Errorf("pmtiles extract failed: %w", waitErr)
@@ -905,10 +971,24 @@ func (c *Chunker) GetJob(sourceID string) *ChunkJob {
 	return c.jobs[sourceID]
 }
 
+// CancelJob cancels a running chunking job
+func (c *Chunker) CancelJob(layerID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if job, exists := c.jobs[layerID]; exists && job.cancel != nil && job.Status == "chunking" {
+		job.cancel()
+		return true
+	}
+	return false
+}
+
 // ClearJob removes a job entry so the layer ID can be reused
 func (c *Chunker) ClearJob(layerID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if job, exists := c.jobs[layerID]; exists && job.cancel != nil {
+		job.cancel()
+	}
 	delete(c.jobs, layerID)
 }
 

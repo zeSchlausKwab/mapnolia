@@ -293,6 +293,13 @@ export async function retryChunk(layerId: string, geohash: string): Promise<void
   if (!res.ok) throw new Error("Failed to retry chunk");
 }
 
+export async function cancelChunking(layerId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/layers/${layerId}/cancel`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to cancel chunking");
+}
+
 export async function retryLayerErrors(layerId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/layers/${layerId}/retry-errors`, {
     method: "POST",

@@ -7,10 +7,9 @@
   "port": 3544,
   "baseURL": "http://localhost:3544",
   "dataDir": "./data",
-  "diskQuota": 10737418240,
+  "diskQuotaGB": 10,
   "privateKey": "",
   "relays": [
-    "wss://relay.damus.io",
-    "wss://nos.lol"
+    "wss://relay.wavefunc.live"
   ]
 }

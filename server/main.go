@@ -58,6 +58,8 @@ func main() {
 	if err := initChunker(); err != nil {
 		slog.Error("failed to initialize chunker", "error", err)
 		// Non-fatal, continue without chunking support
+	} else {
+		chunker.ResumeIncompleteJobs(context.Background())
 	}
 
 	// Create blossy server
@@ -231,6 +233,10 @@ func (r *Router) handleAPI(w http.ResponseWriter, req *http.Request) {
 		id := strings.TrimPrefix(path, "/layers/")
 		id = strings.TrimSuffix(id, "/chunk")
 		handleStartLayerChunking(w, req, id)
+	case strings.HasPrefix(path, "/layers/") && strings.HasSuffix(path, "/cancel") && req.Method == http.MethodPost:
+		id := strings.TrimPrefix(path, "/layers/")
+		id = strings.TrimSuffix(id, "/cancel")
+		handleCancelChunking(w, req, id)
 	case strings.HasPrefix(path, "/layers/") && strings.HasSuffix(path, "/status") && req.Method == http.MethodGet:
 		id := strings.TrimPrefix(path, "/layers/")
 		id = strings.TrimSuffix(id, "/status")
@@ -1181,6 +1187,20 @@ func handleStartLayerChunking(w http.ResponseWriter, r *http.Request, id string)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "started"})
+}
+
+func handleCancelChunking(w http.ResponseWriter, r *http.Request, id string) {
+	if chunker == nil {
+		http.Error(w, "Chunker not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	if chunker.CancelJob(id) {
+		slog.Info("chunking cancelled", "layer", id)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "cancelled"})
+	} else {
+		http.Error(w, "No active chunking job for this layer", http.StatusNotFound)
+	}
 }
 
 func handleGetLayerStatus(w http.ResponseWriter, r *http.Request, id string) {

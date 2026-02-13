@@ -138,7 +138,7 @@ blosmap looks for config files in this order:
   "port": 3544,
   "baseURL": "https://maps.example.com",
   "dataDir": "./data",
-  "diskQuota": 10737418240,
+  "diskQuotaGB": 10,
   "privateKey": "nsec1...",
   "relays": [
     "wss://relay.damus.io",
