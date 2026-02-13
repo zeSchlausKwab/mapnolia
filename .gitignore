@@ -39,6 +39,16 @@ server/dashboard/*
 
 # blosmap data directory and database files
 server/data/
+data/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+# Config (contains private keys)
+blosmap.config.json
+
+# Built binaries
+bin/blosmap-server
+
+# PMTiles CLI binaries (users install separately)
+bin/pmtiles-*

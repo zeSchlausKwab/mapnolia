@@ -1,0 +1,16 @@
+{
+  "name": "My Map Server",
+  "adminPubkey": "",
+  "about": "A Blossom server for PMTiles map data",
+  "picture": "",
+  "host": "0.0.0.0",
+  "port": 3544,
+  "baseURL": "http://localhost:3544",
+  "dataDir": "./data",
+  "diskQuota": 10737418240,
+  "privateKey": "",
+  "relays": [
+    "wss://relay.damus.io",
+    "wss://nos.lol"
+  ]
+}
