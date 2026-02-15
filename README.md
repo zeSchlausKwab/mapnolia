@@ -1,6 +1,18 @@
-# mapnolia
+# mapnolia 🌍
 
-A geospatial data server that chunks [PMTiles](https://pmtiles.io/) map archives into geographic regions, stores them as content-addressed blobs via the [Blossom](https://github.com/hzrd149/blossom) protocol, and announces them over [Nostr](https://nostr.com/) for decentralized map tile discovery.
+Turn massive map tilesets into bite-sized, geographically chunked blobs — served over [Blossom](https://github.com/hzrd149/blossom) and discovered via [Nostr](https://nostr.com/).
+
+mapnolia takes a [PMTiles](https://pmtiles.io/) archive, splits it into **geohash regions**, stores each chunk as a content-addressed blob, and publishes an index to Nostr relays. Clients fetch only the tiles they need for the area on screen.
+
+- 🗺️ **Geohash chunking** — splits the world into regions, recursively subdivides large areas
+- 📦 **Content-addressed storage** — every chunk is a standalone `.pmtiles` file identified by its SHA-256 hash
+- 🌸 **Blossom protocol** — blobs served over HTTP with Range request support
+- 📡 **Nostr discovery** — kind 34444 events announce the chunk index to any relay
+- ⚡ **Single binary** — Go backend with embedded React dashboard, nothing else to deploy
+
+<p align="center">
+  <img src="docs/image.png" alt="mapnolia dashboard" width="700" />
+</p>
 
 ## How It Works
 
@@ -30,7 +42,9 @@ flowchart LR
     NR -->|discover chunks| CL
 ```
 
-A PMTiles file contains an entire map tileset in a single archive. mapnolia splits it into **geohash-based chunks** — each chunk is a standalone `.pmtiles` file covering a geographic region. These chunks are stored in a content-addressed blob store and served via the Blossom protocol (HTTP + SHA-256 addressing). A Nostr event (kind 34444) announces the chunk index so any compatible client can discover and fetch tiles by region.
+<p align="center">
+  <img src="docs/image2.png" alt="mapnolia dashboard" width="700" />
+</p>
 
 ## Getting Started
 
