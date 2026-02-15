@@ -33,3 +33,12 @@ export type { OverlayDescriptor } from './style'
 
 // Nostr
 export { MAP_LAYER_SET_KIND, parseAnnouncementContent } from './nostr'
+
+// Control (framework-agnostic MapLibre plugin)
+export { MapnoliaControl } from './control'
+export type {
+  MapnoliaControlOptions,
+  MapnoliaLayerInfo,
+  MapnoliaSourceInfo,
+  MapnoliaEventMap,
+} from './control'
