@@ -41,7 +41,8 @@ import {
   type ChunkJob,
   type Config,
 } from "@/lib/api";
-import { ChevronDown, ChevronRight, Plus, RefreshCw, Loader2, Database, Layers, Trash2, Play, Radio, Pencil, Check, X, Upload, FileUp, Square } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, RefreshCw, Loader2, Database, Layers, Trash2, Play, Radio, Pencil, Check, X, Upload, FileUp, Square, Map } from "lucide-react";
+import { LayerPreview } from "./LayerPreview";
 
 export function SourceManager() {
   const [sources, setSources] = useState<Source[]>([]);
@@ -78,6 +79,9 @@ export function SourceManager() {
   // Layer title editing
   const [editingLayerTitle, setEditingLayerTitle] = useState<string | null>(null);
   const [editLayerTitleValue, setEditLayerTitleValue] = useState("");
+
+  // Layer preview
+  const [previewLayers, setPreviewLayers] = useState<Record<string, boolean>>({});
 
   // Announcement viewer
   const [announcementEvent, setAnnouncementEvent] = useState<any>(null);
@@ -873,6 +877,17 @@ export function SourceManager() {
                             Stop
                           </Button>
                         )}
+                        {(layer.status === "ready" || layer.file) && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setPreviewLayers(prev => ({ ...prev, [layer.id]: !prev[layer.id] }))}
+                            title="Preview layer"
+                            className={previewLayers[layer.id] ? "text-primary" : ""}
+                          >
+                            <Map className="h-4 w-4" />
+                          </Button>
+                        )}
                         <Button variant="ghost" size="sm" onClick={() => handleDeleteLayer(layer.id)} className="text-destructive hover:text-destructive">
                           <Trash2 className="h-4 w-4" />
                         </Button>
@@ -882,6 +897,11 @@ export function SourceManager() {
 
                   <CollapsibleContent>
                     <div className="border-t p-4 space-y-3">
+                      {/* Layer preview */}
+                      {previewLayers[layer.id] && (
+                        <LayerPreview layer={layer} serverConfig={serverConfig} />
+                      )}
+
                       {/* Chunking progress (only during active chunking) */}
                       {layer.status === "chunking" && job && (
                         <div className="space-y-1">
@@ -1064,7 +1084,20 @@ export function SourceManager() {
                                     // Active download row with progress bar
                                     if (chunk.isActive) {
                                       return (
-                                        <tr key={`active-${chunk.geohash}`} ref={el => { if (el) el.scrollIntoView({ block: "nearest", behavior: "smooth" }); }} className="border-b bg-blue-50 dark:bg-blue-950/30">
+                                        <tr key={`active-${chunk.geohash}`} ref={el => {
+                                          if (!el) return;
+                                          const container = el.closest('.overflow-auto');
+                                          if (!container) return;
+                                          const elTop = el.offsetTop;
+                                          const elBottom = elTop + el.offsetHeight;
+                                          const viewTop = container.scrollTop;
+                                          const viewBottom = viewTop + container.clientHeight;
+                                          if (elTop < viewTop) {
+                                            container.scrollTop = elTop;
+                                          } else if (elBottom > viewBottom) {
+                                            container.scrollTop = elBottom - container.clientHeight;
+                                          }
+                                        }} className="border-b bg-blue-50 dark:bg-blue-950/30">
                                           <td className="p-1.5 font-mono font-medium" style={{ paddingLeft: `${8 + depth * 16}px` }}>
                                             {isChild && <span className="text-muted-foreground mr-1">{"\u2514"}</span>}
                                             <span className="text-blue-600 dark:text-blue-400">{chunk.geohash || "(world)"}</span>

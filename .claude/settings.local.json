@@ -31,7 +31,11 @@
       "Bash(grep:*)",
       "Bash(git add:*)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nchore: prepare repo for public release\n\nRemove config with private key and large binaries from git history,\nadd example config, Dockerfile, and updated deployment docs.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(git remote add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nci: add release workflow for binary builds\n\nBuilds linux/amd64 and linux/arm64 binaries on tag push \\(v*\\)\nand uploads them to GitHub Releases.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix\\(ci\\): enable CGO for sqlite3, use native ARM runner\n\ngo-sqlite3 requires CGO_ENABLED=1. Use native ARM runner\n\\(ubuntu-24.04-arm\\) instead of cross-compiling for arm64.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(bun install:*)"
     ]
   }
 }
