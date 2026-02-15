@@ -384,6 +384,19 @@ data/
 └── layers.json         # Layer configs and chunk mappings
 ```
 
+### Releasing
+
+Releases are built by GitHub Actions for `linux/amd64` and `linux/arm64` (CGO enabled for SQLite). There are two ways to trigger a release:
+
+**From the GitHub UI** — go to Actions → Release → Run workflow, pick `patch`, `minor`, or `major`. The workflow computes the next version from the latest tag, creates the tag, builds, and publishes the release.
+
+**Manual tag push:**
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## License
 
 MIT

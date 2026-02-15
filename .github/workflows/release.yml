@@ -4,12 +4,59 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: write
 
 jobs:
+  resolve-version:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: bump
+        run: |
+          # Get the latest version tag, default to v0.0.0 if none
+          LATEST=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          LATEST=${LATEST:-v0.0.0}
+
+          # Strip leading v and split into parts
+          VERSION=${LATEST#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+
+          case "${{ inputs.bump }}" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          echo "version=v${MAJOR}.${MINOR}.${PATCH}" >> "$GITHUB_OUTPUT"
+          echo "Bumping ${LATEST} -> v${MAJOR}.${MINOR}.${PATCH} (${{ inputs.bump }})"
+
+      - name: Create and push tag
+        run: |
+          git tag ${{ steps.bump.outputs.version }}
+          git push origin ${{ steps.bump.outputs.version }}
+
   build:
+    if: always() && !failure() && !cancelled()
+    needs: resolve-version
     strategy:
       matrix:
         include:
@@ -26,6 +73,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.version || github.ref }}
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -56,7 +105,8 @@ jobs:
           path: mapnolia-server-${{ matrix.goos }}-${{ matrix.goarch }}
 
   release:
-    needs: build
+    needs: [resolve-version, build]
+    if: always() && !failure() && !cancelled()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -66,5 +116,6 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.resolve-version.outputs.version || github.ref_name }}
           generate_release_notes: true
           files: artifacts/*/mapnolia-server-*
